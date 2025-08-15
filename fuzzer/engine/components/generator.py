@@ -215,6 +215,69 @@ class Generator:
 
         return individual
 
+
+    def generate_individual_from_sequence(self, sequence):
+        """
+        根据给定的函数选择子序列（例如 ["a9059cbb", "095ea7b3"]）生成一个个体（chromosome）。
+        会自动处理 constructor（若 interface/bytecode 存在时）并为每次调用随机生成参数与上下文。
+        """
+        individual = []
+
+        # 1) constructor（若有）
+        if "constructor" in self.interface and self.bytecode:
+            args = ["constructor"]
+            for idx, arg_ty in enumerate(self.interface["constructor"]):
+                args.append(self.get_random_argument(arg_ty, "constructor", idx))
+            individual.append({
+                "account": self.get_random_account("constructor"),
+                "contract": self.bytecode,
+                "amount": self.get_random_amount("constructor"),
+                "arguments": args,
+                "blocknumber": self.get_random_blocknumber("constructor"),
+                "timestamp": self.get_random_timestamp("constructor"),
+                "gaslimit": self.get_random_gaslimit("constructor"),
+                "returndatasize": dict()
+            })
+            addr, val = self.get_random_returndatasize_and_address("constructor")
+            individual[-1]["returndatasize"] = {addr: val}
+
+        # 2) 依序添加每个函数调用
+        for selector in sequence:
+            if selector not in self.interface:
+                # 防御：若序列中有不在 interface 的条目，跳过
+                continue
+            args = [selector]
+            arg_types = self.interface[selector]
+            for idx, arg_ty in enumerate(arg_types):
+                args.append(self.get_random_argument(arg_ty, selector, idx))
+            tx = {
+                "account": self.get_random_account(selector),
+                "contract": self.contract,
+                "amount": self.get_random_amount(selector),
+                "arguments": args,
+                "blocknumber": self.get_random_blocknumber(selector),
+                "timestamp": self.get_random_timestamp(selector),
+                "gaslimit": self.get_random_gaslimit(selector),
+                "call_return": dict(),
+                "extcodesize": dict(),
+                "returndatasize": dict()
+            }
+            # 附带环境池的值（与随机生成保持一致）
+            addr, ret_val = self.get_random_callresult_and_address(selector)
+            tx["call_return"] = {addr: ret_val}
+
+            addr, extc_val = self.get_random_extcodesize_and_address(selector)
+            tx["extcodesize"] = {addr: extc_val}
+
+            addr, rds_val = self.get_random_returndatasize_and_address(selector)
+            tx["returndatasize"] = {addr: rds_val}
+
+            individual.append(tx)
+
+        return individual
+
+
+
     def generate_random_input(self):
         input = {}
 
@@ -493,6 +556,7 @@ class Generator:
 
     def get_random_bytes_from_pool(self):
         return self.bytes_pool.head_and_rotate()
+    
 
     #
     # FUNCTION ARGUMENTS

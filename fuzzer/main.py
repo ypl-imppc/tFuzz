@@ -27,10 +27,64 @@ from engine.operators import DataDependencyCrossover
 from engine.operators import Mutation
 from engine.fitness import fitness_function
 
+from extensions.fag_sv_adapter import (
+    build_contract_info_from_ast,
+    build_contract_info_from_abi,
+    generate_sequences as fagsv_gen_sequences,
+)
+
 from utils import settings
 from utils.source_map import SourceMap
 from utils.utils import initialize_logger, compile, get_interface_from_abi, get_pcs_and_jumpis, get_function_signature_mapping
 from utils.control_flow_graph import ControlFlowGraph
+from typing import List
+
+def _generate_fagsv_sequences_from_interface(interface: dict, include_self_pairs: bool = True) -> List[List[str]]:
+    """
+    Phase 1：只基于 ABI/interface 的简化 FAGSV。
+    用 interface 的 key（4字节选择子）作为函数标识，忽略 'constructor' 与 'fallback'。
+    返回若干序列（每个序列是若干 selector 构成的列表）。
+    """
+    selectors = [k for k in interface.keys() if k not in ("constructor", "fallback")]
+    sequences: List[List[str]] = []
+
+    # 单调用序列
+    for s in selectors:
+        sequences.append([s])
+
+    # 自调用序列，用于触发可重入/状态重复迁移
+    if include_self_pairs:
+        for s in selectors:
+            sequences.append([s, s])
+
+    # 去重保序
+    seen = set()
+    uniq = []
+    for seq in sequences:
+        key = tuple(seq)
+        if key not in seen:
+            uniq.append(seq)
+            seen.add(key)
+    return uniq
+
+def _compile_with_ast(source_path: str, solc_version: str = None):
+    """
+    使用 standard-json 编译，返回 (output, ast_by_source)
+    """
+    if solc_version:
+        solcx.install_solc(solc_version, allow_osx=True)
+        solcx.set_solc_version(solc_version)
+    # standard-json
+    with open(source_path, "r", encoding="utf-8") as f:
+        source_code = f.read()
+    std_input = {
+        "language": "Solidity",
+        "sources": {source_path: {"content": source_code}},
+        "settings": {"outputSelection": {"*": {"*": ["abi","evm.bytecode.object","evm.deployedBytecode.object"], "": ["ast"]}}},
+    }
+    output = solcx.compile_standard(std_input, allow_paths=".")
+    ast_by_source = output.get("sources", {}).get(source_path, {}).get("ast")
+    return output, ast_by_source
 
 class Fuzzer:
     def __init__(self, contract_name, abi, deployment_bytecode, runtime_bytecode, test_instrumented_evm, blockchain_state, solver, args, seed, source_map=None):
@@ -38,6 +92,8 @@ class Fuzzer:
 
         logger = initialize_logger("Fuzzer  ")
         logger.title("Fuzzing contract %s", contract_name)
+        self.logger = logger
+        self.abi = abi
 
         cfg = ControlFlowGraph()
         cfg.build(runtime_bytecode, settings.EVM_VERSION)
@@ -135,15 +191,45 @@ class Fuzzer:
         self.instrumented_evm.create_snapshot()
 
         generator = Generator(interface=self.interface,
-                              bytecode=self.deployement_bytecode,
-                              accounts=self.instrumented_evm.accounts,
-                              contract=contract_address)
+                            bytecode=self.deployement_bytecode,
+                            accounts=self.instrumented_evm.accounts,
+                            contract=contract_address)
 
-        # Create initial population
+        # Create initial population (FAGSV with AST -> fallback to ABI -> fallback to random)
         size = 2 * len(self.interface)
-        population = Population(indv_template=Individual(generator=generator),
-                                indv_generator=generator,
-                                size=settings.POPULATION_SIZE if settings.POPULATION_SIZE else size).init()
+        pop_size = settings.POPULATION_SIZE if settings.POPULATION_SIZE else size
+
+        template = Individual(generator=generator)
+        if getattr(self.args, "tx_seed", "random") == "fagsv":
+            sequences = None
+            try:
+                # 1) 先尝试 AST 驱动（Phase 2）
+                output, ast_root = _compile_with_ast(self.args.source, solc_version=None)  # 若有 --solc，可传进来
+                if ast_root:
+                    # 从 AST 里找到目标合约节点；本适配器在 build_contract_info_from_ast 内会再校验
+                    ci = build_contract_info_from_ast(self.abi, ast_root, self.contract_name)
+                    sequences = fagsv_gen_sequences(ci, include_self_pairs=True)
+            except Exception as e:
+                self.logger.warning("FAGSV AST path failed, fallback to ABI-only. Reason: %s", e)
+
+            if not sequences:
+                # 2) 回退：ABI-only（Phase 1）
+                ci = build_contract_info_from_abi(self.abi)
+                sequences = fagsv_gen_sequences(ci, include_self_pairs=True)
+
+            indvs = []
+            for seq in sequences[:pop_size]:
+                chrom = generator.generate_individual_from_sequence(seq)
+                indvs.append(Individual(generator=generator).init(chromosome=chrom))
+            while len(indvs) < pop_size:
+                indvs.append(Individual(generator=generator).init())
+            population = Population(indv_template=template,
+                                    indv_generator=generator,
+                                    size=pop_size).init(indvs=indvs)
+        else:
+            population = Population(indv_template=template,
+                                    indv_generator=generator,
+                                    size=pop_size).init()
 
         # Create genetic operators
         if self.args.data_dependency:
@@ -305,6 +391,9 @@ def launch_argument_parser():
     parser.add_argument("--max-symbolic-execution",
                         help="Maximum number of symbolic execution calls before restting population (default: " + str(settings.MAX_SYMBOLIC_EXECUTION) + ")", action="store",
                         dest="max_symbolic_execution", type=int)
+
+    parser.add_argument("--tx-seed", choices=["random", "fagsv"], default="random",
+                        help="Initial transaction sequence seeding strategy.")
 
     version = "ConFuzzius - Version 0.0.2 - "
     version += "\"By three methods we may learn wisdom:\n"

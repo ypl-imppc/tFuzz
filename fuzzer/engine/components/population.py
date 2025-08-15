@@ -1,5 +1,8 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
+from .individual import Individual
 
 class Individuals(object):
     '''
@@ -104,7 +107,7 @@ class Population(object):
             if len(indvs) != self.size:
                 raise ValueError('Invalid individuals number')
             for indv in indvs:
-                if not isinstance(indv, SessionIndividual):
+                if not isinstance(indv, Individual):
                     raise ValueError('individual class must be Individual or a subclass of Individual')
             self.individuals = indvs
 
