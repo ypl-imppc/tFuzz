@@ -169,6 +169,54 @@ class Generator:
         self.strings_pool = CircularSet()
         self.bytes_pool = CircularSet()
 
+    # ---- NEW: seed argument pools from a simple {type: [values]} dict ----
+    def seed_argument_pools_from_typedict(self, type_dict: dict):
+        """
+        将类似 functionParameter.paramGenerate() 返回的字典：
+          {'address':[...], 'uint':[...], 'int':[...], 'bool':[...], 'string':[...], 'byte':[...]}
+        注入到当前 generator 的参数池中，覆盖到所有函数的所有同类型形参。
+        """
+        # 先处理全局字符串/bytes池，便于 get_random_argument 直接复用
+        if "string" in type_dict and type_dict["string"]:
+            for s in type_dict["string"]:
+                self.add_string_to_pool(str(s))
+        if "byte" in type_dict and type_dict["byte"]:
+            for b in type_dict["byte"]:
+                try:
+                    # 允许 int / bytes / bytearray
+                    if isinstance(b, int):
+                        self.add_bytes_to_pool(self.get_random_bytes(1))  # 填个占位，下面统一走 arguments_pool
+                    elif isinstance(b, (bytes, bytearray)):
+                        self.add_bytes_to_pool(bytes(b))
+                except Exception:
+                    pass
+        
+        # 针对每个函数的每个形参位，若类型前缀匹配，则写入 arguments_pool[func][idx]
+        def _match_prefix(sol_ty: str) -> str:
+            t = sol_ty.lower()
+            if t.startswith("uint"):   return "uint"
+            if t.startswith("int"):    return "int"
+            if t.startswith("address"):return "address"
+            if t.startswith("bool"):   return "bool"
+            if t.startswith("string"): return "string"
+            if t.startswith("bytes"):  # bytes/bytesN 都归为 byte 池
+                return "byte"
+            return ""
+        
+        for func_sel, arg_types in self.interface.items():
+            if func_sel == "constructor":
+                continue
+            for idx, ty in enumerate(arg_types):
+                key = _match_prefix(ty)
+                if key and key in type_dict and type_dict[key]:
+                    if func_sel not in self.arguments_pool:
+                        self.arguments_pool[func_sel] = dict()
+                    if idx not in self.arguments_pool[func_sel]:
+                        self.arguments_pool[func_sel][idx] = CircularSet()
+                    for v in type_dict[key]:
+                        self.arguments_pool[func_sel][idx].add(v)
+    
+
     def generate_random_individual(self):
         individual = []
 

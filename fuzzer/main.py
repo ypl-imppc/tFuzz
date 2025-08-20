@@ -194,6 +194,60 @@ class Fuzzer:
                             bytecode=self.deployement_bytecode,
                             accounts=self.instrumented_evm.accounts,
                             contract=contract_address)
+        try:
+            if self.args.source and os.path.isfile(self.args.source):
+                from engine.components.contract_scraper import create_contractpools
+                with open(self.args.source, "r", encoding="utf-8") as _f:
+                    _source = _f.read()
+
+                # 组建“已知地址集合”：现有 EVM 账户 + 区块链状态里的 from/to
+                known_addrs = set(a.lower() for a in self.instrumented_evm.accounts if isinstance(a, str))
+                for tx in (self.blockchain_state or []):
+                    if isinstance(tx, dict):
+                        if tx.get("from"): known_addrs.add(tx["from"].lower())
+                        if tx.get("to"):   known_addrs.add(tx["to"].lower())
+
+                # 抓取：address/ETH(int, wei)/int/string
+                ap, ethp, intp, strp = create_contractpools(_source, known_addrs)
+
+                # 规范化字符串（去掉两端引号）
+                norm_str = []
+                for s in (strp or []):
+                    if isinstance(s, str) and len(s) >= 2 and s[0] == s[-1] and s[0] in ("'", '"'):
+                        norm_str.append(s[1:-1])
+                    else:
+                        norm_str.append(str(s))
+
+                # 把 ETH pool 视为 uint（金钱常量→wei）
+                typedict = {
+                    "address": list(ap or []),
+                    "uint":    sorted({int(x) for x in (ethp or set()) if int(x) >= 0}),
+                    "int":     sorted({int(x) for x in (intp or set())}),
+                    "string":  norm_str,
+                }
+                # 常用兜底值
+                typedict["uint"].extend([0])       # 允许 0 值调用
+                typedict["int"].extend([0, -1, 1]) # 邻域探索
+
+                # 注入到 Generator（若方法存在）
+                if hasattr(generator, "seed_argument_pools_from_typedict"):
+                    generator.seed_argument_pools_from_typedict(typedict)
+                    self.logger.debug("Seeded argument pools from contract_scraper pools.")
+        except AssertionError as ae:
+            # 若硬编码地址不在已知集合里，contract_scraper 会 assert；这里降级为警告，不阻断运行
+            self.logger.warning(f"contract_scraper address check failed: {ae}")
+        except Exception as e:
+            self.logger.debug(f"contract_scraper seeding skipped: {type(e).__name__}: {e}")
+
+            
+        try:
+            from engine.components.functionParameter import paramGenerate  # 你的原文件
+            _typedict = paramGenerate()
+            if isinstance(_typedict, dict) and hasattr(generator, "seed_argument_pools_from_typedict"):
+                generator.seed_argument_pools_from_typedict(_typedict)
+                self.logger.debug("Seeded argument pools from functionParameter.paramGenerate().")
+        except Exception as _e:
+            self.logger.debug(f"Param seeding skipped: {type(_e).__name__}: {_e}")
 
         # Create initial population (FAGSV with AST -> fallback to ABI -> fallback to random)
         size = 2 * len(self.interface)
