@@ -168,43 +168,164 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
 
         return reads, writes
 
-    # 遍历合约内函数
+    # ---- helpers for per-function Key Attributes & call graph ----
+    def has_key_attributes_in_statement(stmt: dict) -> bool:
+        """Return True if any of the three Key Attributes appear inside this statement tree."""
+        if not isinstance(stmt, dict):
+            return False
+        stack = [stmt]
+        def get(node, *path, default=None):
+            cur = node
+            for p in path:
+                if isinstance(cur, dict) and p in cur:
+                    cur = cur[p]
+                else:
+                    return default
+            return cur
+        while stack:
+            n = stack.pop()
+            if not isinstance(n, dict):
+                continue
+            nt = n.get("nodeType")
+            # KA1: value-bearing external calls (call{value}, transfer/send)
+            if nt == "FunctionCall":
+                names = n.get("names") or []
+                if names:
+                    lower = [str(x).lower() for x in names]
+                    if "value" in lower:
+                        return True
+                expr = n.get("expression", {})
+                if isinstance(expr, dict) and expr.get("nodeType") == "MemberAccess":
+                    m = (expr.get("memberName") or "").lower()
+                    if m in {"transfer", "send"}:
+                        return True
+            if nt == "MemberAccess":
+                mem = (n.get("memberName") or "").lower()
+                if mem in {"call", "value"}:
+                    # old-style chain indicator; treat as KA hit conservatively
+                    return True
+            # KA2: arithmetic ops (+,-,*) or compound (+=,-=,*=)
+            if nt == "BinaryOperation" and n.get("operator") in {"+","-","*"}:
+                return True
+            if nt == "Assignment" and n.get("operator") in {"+=","-=","*="}:
+                return True
+            # KA3: time references block.timestamp / now
+            if nt == "MemberAccess":
+                base = get(n, "expression", "name", default="") or get(n, "expression", "memberName", default="")
+                mem  = (n.get("memberName") or "").lower()
+                if (str(base).lower() == "block" and mem == "timestamp"):
+                    return True
+            if nt == "Identifier" and (n.get("name") or "").lower() == "now":
+                return True
+            for _, v in n.items():
+                if isinstance(v, dict):
+                    stack.append(v)
+                elif isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, dict):
+                            stack.append(it)
+        return False
+
+    def collect_called_function_names(stmt: dict, own_function_names: Set[str]) -> Set[str]:
+        """Collect names of functions (within the same contract) that are called from this statement tree."""
+        called: Set[str] = set()
+        if not isinstance(stmt, dict):
+            return called
+        stack = [stmt]
+        while stack:
+            n = stack.pop()
+            if not isinstance(n, dict):
+                continue
+            nt = n.get("nodeType")
+            if nt == "FunctionCall":
+                expr = n.get("expression", {})
+                # direct internal call: Identifier with function name
+                if isinstance(expr, dict) and expr.get("nodeType") == "Identifier":
+                    fname = expr.get("name")
+                    if fname in own_function_names:
+                        called.add(fname)
+                # this.f() / super.f() style: MemberAccess -> memberName is function
+                if isinstance(expr, dict) and expr.get("nodeType") == "MemberAccess":
+                    m = expr.get("memberName")
+                    # be conservative: if memberName is one of our function names, count it
+                    if m in own_function_names:
+                        called.add(m)
+            for _, v in n.items():
+                if isinstance(v, dict):
+                    stack.append(v)
+                elif isinstance(v, list):
+                    for it in v:
+                        if isinstance(it, dict):
+                            stack.append(it)
+        return called
+
+    # 收集本合约声明的函数名（用于构造调用图）
+    own_function_names: Set[str] = set()
+    for n in contract_def.get("nodes", []):
+        if n.get("nodeType") == "FunctionDefinition" and n.get("name"):
+            own_function_names.add(n.get("name"))
+
+    # 第一遍：收集每个函数的读/写、体节点、KeyAttributes、以及它调用了谁
+    tmp_funcs = []  # list of dict: {name, selector, body, reads, writes, has_global_flag, has_ka_flag, calls}
     for n in contract_def.get("nodes", []):
         if n.get("nodeType") == "FunctionDefinition":
             fn_name = n.get("name")
             if not fn_name:
-                # fallback/receive 匿名函数：不作为外部可见函数纳入 FAGSV
-                continue
+                continue  # 匿名/fallback/receive 不纳入
             params = n.get("parameters", {}).get("parameters", []) or []
             selector = name_to_selector(fn_name, param_count=len(params))
             if selector is None or selector not in abi_selector_to_entry:
                 continue  # 非外部可调用或 ABI 不含该函数
 
-            # 读取函数体中的读写
             reads, writes = set(), set()
             body = n.get("body")
             if isinstance(body, dict):
                 r, w = collect_rw_in_statement(body, state_vars)
                 reads |= r; writes |= w
+            has_global_flag = 1 if (reads or writes) else 0
+            has_ka_flag = 1 if (isinstance(body, dict) and has_key_attributes_in_statement(body)) else 0
+            calls = collect_called_function_names(body, own_function_names) if isinstance(body, dict) else set()
 
-            # 评分（可调参）：写*2 + 读 + 参数数*0.5 + payable(1/0)
-            abi_entry = abi_selector_to_entry[selector]
-            payable_bonus = 1.0 if abi_entry.get("stateMutability") == "payable" else 0.0
-            score = 2.0*len(writes) + 1.0*len(reads) + 0.5*len(abi_entry.get("inputs", [])) + payable_bonus
+            tmp_funcs.append({
+                "name": fn_name,
+                "selector": selector,
+                "body": body,
+                "reads": reads,
+                "writes": writes,
+                "has_global_flag": has_global_flag,
+                "has_ka_flag": has_ka_flag,
+                "calls": calls,
+            })
 
-            ci.add_function(FunctionInfo(
-                selector=selector,
-                visibility="external",            # ABI 外部可调
-                activity_score=score,
-                reads=reads,
-                writes=writes
-            ))
+    # 构建入度（函数被多少其他函数调用）
+    in_deg: Dict[str, int] = {f["name"]: 0 for f in tmp_funcs}
+    for f in tmp_funcs:
+        caller = f["name"]
+        for callee in f["calls"]:
+            if callee in in_deg and callee != caller:
+                in_deg[callee] += 1
 
-            # 建立读/写映射
-            for v in reads:
-                ci.read_map.setdefault(v, set()).add(selector)
-            for v in writes:
-                ci.write_map.setdefault(v, set()).add(selector)
+    # 第二遍：计算评分并写入 ContractInfo
+    for f in tmp_funcs:
+        fn_name = f["name"]
+        selector = f["selector"]
+        reads, writes = f["reads"], f["writes"]
+        # 评分 = 0.1*全局变量 + 0.5*关键属性 + 0.4*函数入度
+        score = 0.1 * float(f["has_global_flag"]) + 0.5 * float(f["has_ka_flag"]) + 0.4 * float(in_deg.get(fn_name, 0))
+
+        ci.add_function(FunctionInfo(
+            selector=selector,
+            visibility="external",
+            activity_score=score,
+            reads=reads,
+            writes=writes,
+        ))
+
+        # 建立读/写映射
+        for v in reads:
+            ci.read_map.setdefault(v, set()).add(selector)
+        for v in writes:
+            ci.write_map.setdefault(v, set()).add(selector)
 
     return ci
 
