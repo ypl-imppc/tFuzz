@@ -9,6 +9,7 @@ import solcx
 import random
 import logging
 import argparse
+import re
 
 from eth_utils import encode_hex, decode_hex, to_canonical_address
 from z3 import Solver
@@ -85,6 +86,72 @@ def _compile_with_ast(source_path: str, solc_version: str = None):
     output = solcx.compile_standard(std_input, allow_paths=".")
     ast_by_source = output.get("sources", {}).get(source_path, {}).get("ast")
     return output, ast_by_source
+
+
+# Heuristic auto-selector for the top-level contract in a multi-contract .sol file.
+def _auto_select_top_caller_from_source(source_text: str) -> str:
+    """
+    Heuristic auto-selector for the top-level contract in a multi-contract .sol file.
+    We pick the contract that *calls other contracts* but is *not called by others*.
+
+    Implementation notes:
+      - Parse contract blocks via regex (no dependency on solc availability here).
+      - For each contract A and every other contract name B, if A declares a variable or
+        parameter of type B (e.g., `B x;` or `function f(B x)`) and later uses `x.<member>`
+        inside A's body, we add a directed edge A -> B.
+      - We then return a contract with out-degree > 0 and in-degree == 0. If multiple exist,
+        return the one with the largest out-degree; if none match, return the last contract
+        (fallback keeps behavior deterministic across runs).
+    """
+    # Capture `contract Name { ... }` blocks including nested braces conservatively.
+    # This simple parser assumes no `contract` keyword inside comments/strings.
+    contract_pattern = re.compile(r"contract\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>[\s\S]*?)\}\s*", re.MULTILINE)
+    contracts = [(m.group("name"), m.group("body")) for m in contract_pattern.finditer(source_text)]
+    if not contracts:
+        return ""
+
+    names = [n for n, _ in contracts]
+    # Build adjacency sets
+    out_edges = {n: set() for n in names}
+    in_edges = {n: set() for n in names}
+
+    # Precompile helper regexes per contract name B
+    # Pattern to find identifiers declared with type B: either var decls or params
+    def _var_decl_regex(B):
+        # Matches: `B x` (variable/parameter), capturing `x`
+        return re.compile(r"\b" + re.escape(B) + r"\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+
+    for A_name, A_body in contracts:
+        for B in names:
+            if B == A_name:
+                continue
+            # Collect potential identifiers of type B in A's body
+            ids = set(m.group(1) for m in _var_decl_regex(B).finditer(A_body))
+            if not ids:
+                continue
+            # If any identifier of type B is used with a member access (id.<something>),
+            # treat it as a cross-contract call usage.
+            called = False
+            for ident in ids:
+                if re.search(r"\b" + re.escape(ident) + r"\s*\.\s*[A-Za-z_][A-Za-z0-9_]*\s*\(", A_body):
+                    called = True
+                    break
+            if called:
+                out_edges[A_name].add(B)
+                in_edges[B].add(A_name)
+
+    # Select contract with out>0 and in==0; tie-breaker: max out-degree, then last occurrence order
+    candidates = [n for n in names if len(out_edges[n]) > 0 and len(in_edges[n]) == 0]
+    if candidates:
+        # sort by out-degree (desc) and by original order (stable by names.index)
+        candidates.sort(key=lambda x: (len(out_edges[x]), names.index(x)))
+        return candidates[-1]  # highest out-degree, and latest in order among equals
+
+    # Fallbacks: contract with max out-degree, else last contract defined
+    best = max(names, key=lambda x: len(out_edges[x]))
+    if len(out_edges[best]) > 0:
+        return best
+    return names[-1]
 
 class Fuzzer:
     def __init__(self, contract_name, abi, deployment_bytecode, runtime_bytecode, test_instrumented_evm, blockchain_state, solver, args, seed, source_map=None):
@@ -364,6 +431,23 @@ def main():
             if not compiler_output:
                 logger.error("No compiler output for: " + args.source)
                 sys.exit(-1)
+            # Auto-select the top-level contract (calls others, not called by others) when -c/--contract is not provided
+            if not args.contract:
+                try:
+                    with open(args.source, "r", encoding="utf-8") as _sf:
+                        _src_text = _sf.read()
+                    auto_choice = _auto_select_top_caller_from_source(_src_text)
+                    if auto_choice and auto_choice in compiler_output['contracts'][args.source]:
+                        logger.info(f"Auto-selected contract: {auto_choice} (calls other contracts and is not called by others)")
+                        args.contract = auto_choice
+                    else:
+                        # Fallback to last contract in compiler output for deterministic behavior
+                        all_names = list(compiler_output['contracts'][args.source].keys())
+                        if all_names:
+                            args.contract = all_names[-1]
+                            logger.info(f"Auto-selection fallback to last contract: {args.contract}")
+                except Exception as _e:
+                    logger.warning(f"Auto-selection failed: {type(_e).__name__}: {_e}")
             for contract_name, contract in compiler_output['contracts'][args.source].items():
                 if args.contract and contract_name != args.contract:
                     continue
