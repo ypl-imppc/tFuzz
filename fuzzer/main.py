@@ -381,7 +381,6 @@ class Fuzzer:
         self.instrumented_evm.reset()
 
 def main():
-    # print_logo()
     args = launch_argument_parser()
 
     logger = initialize_logger("Main    ")
@@ -596,15 +595,6 @@ def launch_argument_parser():
         settings.RPC_PORT = args.rpc_port
 
     return args
-
-def print_logo():
-    print("")
-    print("     ______            ______                _           ")
-    print("    / ____/___  ____  / ____/_  __________  (_)_  _______")
-    print("   / /   / __ \/ __ \/ /_  / / / /_  /_  / / / / / / ___/")
-    print("  / /___/ /_/ / / / / __/ / /_/ / / /_/ /_/ / /_/ (__  ) ")
-    print("  \____/\____/_/ /_/_/    \__,_/ /___/___/_/\__,_/____/  ")
-    print("")
 
 if '__main__' == __name__:
     main()

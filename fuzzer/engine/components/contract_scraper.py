@@ -1,5 +1,6 @@
 # contract_scraper.py
 import re
+from decimal import Decimal, InvalidOperation
 
 def create_contractpools(_contractSol, _known_addresses):
     """
@@ -7,12 +8,12 @@ def create_contractpools(_contractSol, _known_addresses):
     返回: addresspool, ETHpool, intpool, stringpool
     """
     contractSol = _contractSol
-    if len(_known_addresses) > 0:
-        addresspool = scrape_addresses(contractSol)
-    else:
-        addresspool = set()
-    assert addresspool.intersection(_known_addresses) == addresspool, \
-        "A hardcoded address was found that does not exist on the blockchain used."
+    # Always scrape addresses from source; validate against known set if provided
+    addresspool = scrape_addresses(contractSol)
+    if _known_addresses:
+        assert addresspool.intersection(_known_addresses) == addresspool, \
+            "A hardcoded address was found that does not exist on the blockchain used."
+
     ETHpool = scrape_vals(contractSol)
     intpool = scrape_ints(contractSol)
     stringpool = scrape_strings(contractSol)
@@ -20,72 +21,66 @@ def create_contractpools(_contractSol, _known_addresses):
 
 
 def scrape_addresses(_contractSol):
-    """抓取硬编码以 0x 开头的 40 位地址（大小写混合均可）"""
+    """抓取硬编码以 0x 开头的 40 位十六进制地址（大小写均可）"""
     contractSol = _contractSol
     addresspool = set()
-    regex = r"0x[A-Za-z0-9]{40}"
-    addressMatches = re.finditer(regex, contractSol, re.MULTILINE)
-    for match in addressMatches:
-        addresspool.add(match.group().lower()) # <--- 统一小写
+    regex = r"0x[0-9a-fA-F]{40}"
+    for match in re.finditer(regex, contractSol, re.MULTILINE):
+        addresspool.add(match.group().lower())  # 统一小写
     return addresspool
 
 
 def scrape_vals(_contractSol):
     """
-    抓取硬编码的 ETH 金额：形如 '1 wei|szabo|finney|ether'。
+    抓取硬编码的 ETH 金额：形如 '1 wei|gwei|szabo|finney|ether'。
     统一换算为 wei（整数），并放入 ETHpool。
     """
     contractSol = _contractSol
     ETHpool = set()
-    regex = r"[0-9]*\.?[0-9]+\s*(wei|szabo|finney|ether)"
-    valMatches = re.finditer(regex, contractSol, re.MULTILINE)
-    for match in valMatches:
-        regex = r"[0-9]*\.?[0-9]+"
-        val = float(re.search(regex, match.group()).group())
-        unit = match.group().split()[-1]
-
-        if unit == "wei":
-            assert val % 1 == 0, f"A non-integer wei value was found: {val}"
-            ETHpool.add(int(val))
-        elif unit == "szabo":
-            val = val * 10**12
-            assert val % 1 == 0, f"A non-integer wei value was found: {val}"
-            ETHpool.add(int(val))
-        elif unit == "ether":
-            val = val * 10**18
-            assert val % 1 == 0, f"A non-integer wei value was found: {val}"
-            ETHpool.add(int(val))
-        else:
-            # finney
-            val = val * 10**15
-            assert val % 1 == 0, f"A non-integer wei value was found: {val}"
-            ETHpool.add(int(val))
+    # 捕获数值+单位；单位边界用 \b，避免匹配到更长标识符
+    regex = r"([0-9]*\.?[0-9]+)\s*(wei|gwei|szabo|finney|ether)\b"
+    for m in re.finditer(regex, contractSol, re.MULTILINE):
+        num_s, unit = m.groups()
+        try:
+            val = Decimal(num_s)
+        except InvalidOperation:
+            continue
+        scale = {
+            'wei':   Decimal(1),
+            'gwei':  Decimal(10) ** 9,
+            'szabo': Decimal(10) ** 12,
+            'finney':Decimal(10) ** 15,
+            'ether': Decimal(10) ** 18,
+        }[unit]
+        wei = val * scale
+        # 必须是整数 wei
+        assert wei == wei.to_integral_value(), f"A non-integer wei value was found: {wei}"
+        ETHpool.add(int(wei))
     return ETHpool
 
 
 def scrape_ints(_contractSol):
     """
-    抓取硬编码整数（排除 pragma 行与紧随 int/uint 声明的字面量），
+    抓取硬编码整数（排除 pragma 行与变量声明中的初始化字面量），
     并把 n, n+1, n-1 都加入 pool，提高邻域探索。
     """
     contractSol = _contractSol
-    intpool = set()
 
     # 删除 pragma 行，避免把版本号当作整数抓取
-    regex = r"(pragma solidity)\s*[\ˆ\^]?[0-9\.]*"
-    pragmaMatch = re.search(regex, contractSol, re.MULTILINE)
-    while pragmaMatch:
-        contractSol = contractSol[:pragmaMatch.span()[0]] + contractSol[pragmaMatch.span()[1]:]
-        pragmaMatch = re.search(regex, contractSol, re.MULTILINE)
+    contractSol = re.sub(r"(?:pragma\s+solidity)\s*\^?[0-9.]*", "", contractSol)
 
-    # 忽略紧跟在 int/uint 声明后的整数；其余负号与数字匹配
-    regex = r"-?(?<![(int)\d])\d+"
-    intMatches = re.finditer(regex, contractSol, re.MULTILINE)
-    for match in intMatches:
-        n = int(match.group())
-        intpool.add(n)
-        intpool.add(n + 1)
-        intpool.add(n - 1)
+    # 删除形如 `uint x = 123` 或 `int256 y= -5` 中的字面量，避免误抓
+    contractSol = re.sub(
+        r"\b(?:u?int(?:8|16|32|64|128|256)?)\s+[A-Za-z_]\w*\s*=\s*-?\d+",
+        lambda m: re.sub(r"-?\d+", "", m.group(0)),
+        contractSol
+    )
+
+    intpool = set()
+    # 抓取独立的十进制整数（避免紧接标识符的情形）
+    for m in re.finditer(r"(?<![A-Za-z0-9_])-?\d+\b", contractSol):
+        n = int(m.group())
+        intpool.update({n, n + 1, n - 1})
     return intpool
 
 
@@ -153,6 +148,6 @@ def remove_errorStrings(_contractSol, _brack_ctr, _pos):
                 return _contractSol, pos + 1
         else:
             position = pos + 1
-            return remove_errorStrings(_contractSol, _brack_ctr, position)
+            return remove_errorStrings(_contractSol, brack_ctr, position)
     else:
         raise AssertionError(f"Found unexpected pattern: {found}")
