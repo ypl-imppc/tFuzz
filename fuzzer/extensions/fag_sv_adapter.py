@@ -169,10 +169,16 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
         return reads, writes
 
     # ---- helpers for per-function Key Attributes & call graph ----
-    def has_key_attributes_in_statement(stmt: dict) -> bool:
-        """Return True if any of the three Key Attributes appear inside this statement tree."""
+    def count_key_attributes_in_statement(stmt: dict) -> int:
+        """Count occurrences of Key Attributes inside this statement tree.
+        Key Attributes:
+          KA1: value-bearing external calls (call{value}, transfer, send) or old-style `.call.value`/`.value` chain
+          KA2: arithmetic ops (+, -, *) and compound assignments (+=, -=, *=)
+          KA3: time references: block.timestamp or now()
+        """
         if not isinstance(stmt, dict):
-            return False
+            return 0
+        total = 0
         stack = [stmt]
         def get(node, *path, default=None):
             cur = node
@@ -187,36 +193,38 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
             if not isinstance(n, dict):
                 continue
             nt = n.get("nodeType")
-            # KA1: value-bearing external calls (call{value}, transfer/send)
+            # KA1: value-bearing external calls / transfer / send / old-style value chain
             if nt == "FunctionCall":
+                # Modern syntax call{value: ...} is represented with "names" containing "value"
                 names = n.get("names") or []
                 if names:
                     lower = [str(x).lower() for x in names]
                     if "value" in lower:
-                        return True
+                        total += 1
                 expr = n.get("expression", {})
                 if isinstance(expr, dict) and expr.get("nodeType") == "MemberAccess":
                     m = (expr.get("memberName") or "").lower()
                     if m in {"transfer", "send"}:
-                        return True
+                        total += 1
             if nt == "MemberAccess":
                 mem = (n.get("memberName") or "").lower()
+                # old-style `.call.value` or `.value` chain
                 if mem in {"call", "value"}:
-                    # old-style chain indicator; treat as KA hit conservatively
-                    return True
-            # KA2: arithmetic ops (+,-,*) or compound (+=,-=,*=)
+                    total += 1
+            # KA2: arithmetic ops and compound assignments
             if nt == "BinaryOperation" and n.get("operator") in {"+","-","*"}:
-                return True
+                total += 1
             if nt == "Assignment" and n.get("operator") in {"+=","-=","*="}:
-                return True
-            # KA3: time references block.timestamp / now
+                total += 1
+            # KA3: time references
             if nt == "MemberAccess":
-                base = get(n, "expression", "name", default="") or get(n, "expression", "memberName", default="")
+                base_name = get(n, "expression", "name", default="") or get(n, "expression", "memberName", default="")
                 mem  = (n.get("memberName") or "").lower()
-                if (str(base).lower() == "block" and mem == "timestamp"):
-                    return True
+                if (str(base_name).lower() == "block" and mem == "timestamp"):
+                    total += 1
             if nt == "Identifier" and (n.get("name") or "").lower() == "now":
-                return True
+                total += 1
+            # descend
             for _, v in n.items():
                 if isinstance(v, dict):
                     stack.append(v)
@@ -224,7 +232,7 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
                     for it in v:
                         if isinstance(it, dict):
                             stack.append(it)
-        return False
+        return total
 
     def collect_called_function_names(stmt: dict, own_function_names: Set[str]) -> Set[str]:
         """Collect names of functions (within the same contract) that are called from this statement tree."""
@@ -282,8 +290,8 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
             if isinstance(body, dict):
                 r, w = collect_rw_in_statement(body, state_vars)
                 reads |= r; writes |= w
-            has_global_flag = 1 if (reads or writes) else 0
-            has_ka_flag = 1 if (isinstance(body, dict) and has_key_attributes_in_statement(body)) else 0
+            global_var_count = len((reads or set()) | (writes or set()))
+            ka_count = count_key_attributes_in_statement(body) if isinstance(body, dict) else 0
             calls = collect_called_function_names(body, own_function_names) if isinstance(body, dict) else set()
 
             tmp_funcs.append({
@@ -292,8 +300,8 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
                 "body": body,
                 "reads": reads,
                 "writes": writes,
-                "has_global_flag": has_global_flag,
-                "has_ka_flag": has_ka_flag,
+                "global_var_count": global_var_count,
+                "ka_count": ka_count,
                 "calls": calls,
             })
 
@@ -310,8 +318,12 @@ def build_contract_info_from_ast(abi: List[dict], contract_ast: dict, contract_n
         fn_name = f["name"]
         selector = f["selector"]
         reads, writes = f["reads"], f["writes"]
-        # 评分 = 0.1*全局变量 + 0.5*关键属性 + 0.4*函数入度
-        score = 0.1 * float(f["has_global_flag"]) + 0.5 * float(f["has_ka_flag"]) + 0.4 * float(in_deg.get(fn_name, 0))
+        # 评分 = 0.1*全局变量数量 + 0.5*关键属性数量 + 0.4*入度
+        score = (
+            0.1 * float(f.get("global_var_count", 0)) +
+            0.5 * float(f.get("ka_count", 0)) +
+            0.4 * float(in_deg.get(fn_name, 0))
+        )
 
         ci.add_function(FunctionInfo(
             selector=selector,
