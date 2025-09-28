@@ -36,6 +36,7 @@ from extensions.fag_sv_adapter import (
 
 from utils import settings
 from utils.source_map import SourceMap
+from utils.inter_contract import build_xcfg_from_standard_json
 from utils.utils import initialize_logger, compile, get_interface_from_abi, get_pcs_and_jumpis, get_function_signature_mapping
 from utils.control_flow_graph import ControlFlowGraph
 from typing import List
@@ -201,6 +202,48 @@ class Fuzzer:
         contract_address = None
         self.instrumented_evm.create_fake_accounts()
 
+        # Build XCFG from AST (and pre-deploy auxiliary contracts for cross-contract calls)
+        ast_output = None
+        try:
+            if self.args.source and os.path.isfile(self.args.source):
+                ast_output, ast_root = _compile_with_ast(self.args.source, solc_version=str(self.args.solc_version))
+                if ast_output:
+                    xcfg = build_xcfg_from_standard_json(ast_output, self.args.source)
+                    # Attach XCFG to environment for later analyses/visibility
+                    setattr(self.env, 'xcfg', xcfg)
+                    # Heuristically deploy other contracts (excluding the target) so their addresses are available
+                    other_contracts_blob = (ast_output.get('contracts', {}) or {}).get(self.args.source, {})
+                    self.env.deployed_contracts = {}
+                    for cname, cblob in other_contracts_blob.items():
+                        if cname == self.contract_name:
+                            continue
+                        try:
+                            bc = (((cblob or {}).get('evm', {}) or {}).get('bytecode', {}) or {}).get('object')
+                            if bc:
+                                res = self.instrumented_evm.deploy_contract(self.instrumented_evm.accounts[0], bc)
+                                if not res.is_error:
+                                    addr = encode_hex(res.msg.storage_address)
+                                    if addr not in self.instrumented_evm.accounts:
+                                        self.instrumented_evm.accounts.append(addr)
+                                    self.env.other_contracts.append(to_canonical_address(addr))
+                                    self.env.deployed_contracts[cname] = addr
+                                    cc, _ = get_pcs_and_jumpis(self.instrumented_evm.get_code(to_canonical_address(addr)).hex())
+                                    self.env.len_overall_pcs_with_children += len(cc)
+                                    self.logger.debug(f"Pre-deployed helper contract {cname} at {addr}")
+                        except Exception as _de:
+                            self.logger.debug(f"Skip pre-deploy {cname}: {type(_de).__name__}: {_de}")
+                    # Log who calls whom (source-level)
+                    try:
+                        for A, edges in (xcfg or {}).items():
+                            if not edges:
+                                continue
+                            for ((a, f), (b, g)) in edges:
+                                self.logger.info(f"XCFG: {a}.{f} -> {b}.{g}")
+                    except Exception:
+                        pass
+        except Exception as _e:
+            self.logger.debug(f"XCFC build skipped: {type(_e).__name__}: {_e}")
+
         if self.args.source:
             for transaction in self.blockchain_state:
                 if transaction['from'].lower() not in self.instrumented_evm.accounts:
@@ -351,6 +394,26 @@ class Fuzzer:
             population = Population(indv_template=template,
                                     indv_generator=generator,
                                     size=pop_size).init()
+
+        # Augment initial population with basic+boundary combinations per function (cap to population size)
+        try:
+            if len(population.individuals) < pop_size:
+                for func_sel, arg_types in self.interface.items():
+                    if func_sel in ("constructor", "fallback"):
+                        continue
+                    for combo in generator.iter_param_combinations(func_sel, max_cases=3):
+                        # create single-call chromosome with our combo
+                        base = generator.generate_individual_from_sequence([func_sel])
+                        # Override the last tx arguments
+                        base[-1]["arguments"] = [func_sel] + list(combo)
+                        indv = Individual(generator=generator).init(chromosome=base)
+                        population.individuals.append(indv)
+                        if len(population.individuals) >= pop_size:
+                            break
+                    if len(population.individuals) >= pop_size:
+                        break
+        except Exception as _e:
+            self.logger.debug(f"Seed combos skipped: {type(_e).__name__}: {_e}")
 
         # Create genetic operators
         if self.args.data_dependency:
@@ -529,7 +592,7 @@ def launch_argument_parser():
                         help="Maximum number of symbolic execution calls before restting population (default: " + str(settings.MAX_SYMBOLIC_EXECUTION) + ")", action="store",
                         dest="max_symbolic_execution", type=int)
 
-    parser.add_argument("--tx-seed", choices=["random", "fagsv"], default="random",
+    parser.add_argument("--tx-seed", choices=["random", "fagsv"], default="fagsv",
                         help="Initial transaction sequence seeding strategy.")
 
     version = "ConFuzzius - Version 0.0.2 - "

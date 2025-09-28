@@ -168,6 +168,32 @@ class Generator:
         self.argument_array_sizes_pool = {}
         self.strings_pool = CircularSet()
         self.bytes_pool = CircularSet()
+        # Parameter usage accounting: {function_selector: {index: {"type": str, "values": set()}}}
+        self.param_usage = {}
+        # Parameter selection strategy hint: 'mixed'|'basic'|'boundary'
+        self.param_strategy = 'mixed'
+
+    # ---- usage recording helpers ----
+    def _record_arg_usage(self, function: str, index: int, value, type_str: str = None):
+        try:
+            if function not in self.param_usage:
+                self.param_usage[function] = {}
+            if index not in self.param_usage[function]:
+                self.param_usage[function][index] = {"type": type_str or "", "values": set()}
+            # Flatten lists/arrays
+            if isinstance(value, list):
+                for v in value:
+                    self.param_usage[function][index]["values"].add(str(v))
+            else:
+                self.param_usage[function][index]["values"].add(str(value))
+        except Exception:
+            # never break fuzzing on accounting failures
+            pass
+
+    def get_argument_value_with_recording(self, type, function, argument_index):
+        val = self.get_random_argument(type, function, argument_index)
+        self._record_arg_usage(function, argument_index, val, str(type))
+        return val
 
     # ---- NEW: seed argument pools from a simple {type: [values]} dict ----
     def seed_argument_pools_from_typedict(self, type_dict: dict):
@@ -223,7 +249,7 @@ class Generator:
         if "constructor" in self.interface and self.bytecode:
             arguments = ["constructor"]
             for index in range(len(self.interface["constructor"])):
-                arguments.append(self.get_random_argument(self.interface["constructor"][index], "constructor", index))
+                arguments.append(self.get_argument_value_with_recording(self.interface["constructor"][index], "constructor", index))
             individual.append({
                 "account": self.get_random_account("constructor"),
                 "contract": self.bytecode,
@@ -238,7 +264,7 @@ class Generator:
         function, argument_types = self.get_random_function_with_argument_types()
         arguments = [function]
         for index in range(len(argument_types)):
-            arguments.append(self.get_random_argument(argument_types[index], function, index))
+            arguments.append(self.get_argument_value_with_recording(argument_types[index], function, index))
         individual.append({
             "account": self.get_random_account(function),
             "contract": self.contract,
@@ -275,7 +301,7 @@ class Generator:
         if "constructor" in self.interface and self.bytecode:
             args = ["constructor"]
             for idx, arg_ty in enumerate(self.interface["constructor"]):
-                args.append(self.get_random_argument(arg_ty, "constructor", idx))
+                args.append(self.get_argument_value_with_recording(arg_ty, "constructor", idx))
             individual.append({
                 "account": self.get_random_account("constructor"),
                 "contract": self.bytecode,
@@ -297,7 +323,7 @@ class Generator:
             args = [selector]
             arg_types = self.interface[selector]
             for idx, arg_ty in enumerate(arg_types):
-                args.append(self.get_random_argument(arg_ty, selector, idx))
+                args.append(self.get_argument_value_with_recording(arg_ty, selector, idx))
             tx = {
                 "account": self.get_random_account(selector),
                 "contract": self.contract,
@@ -332,7 +358,67 @@ class Generator:
         function, argument_types = self.get_random_function_with_argument_types()
         arguments = [function]
         for index in range(len(argument_types)):
-            arguments.append(self.get_random_argument(argument_types[index], function, index))
+            arguments.append(self.get_argument_value_with_recording(argument_types[index], function, index))
+
+    # ---- combination helpers (basic + boundary) ----
+    def _candidate_values_for_type(self, ty: str, limit: int = 4):
+        """Return a small list of candidate values emphasizing boundary seeds."""
+        ty_l = (ty or "").lower()
+        # Prefer per-function argument pool when available is handled by caller
+        if ty_l.startswith('bool'):
+            return [False, True]
+        if ty_l.startswith('uint'):
+            # few canonical unsigned
+            return [0, 1, 2, 255, 256]
+        if ty_l.startswith('int'):
+            return [-1, 0, 1]
+        if ty_l.startswith('address'):
+            samp = self.accounts[:]
+            return samp[:min(len(samp), max(1, limit))]
+        if ty_l.startswith('string'):
+            out = []
+            if not self.strings_pool.empty:
+                for _ in range(min(limit, len(self.strings_pool._q))):
+                    out.append(self.get_random_string_from_pool())
+                return out
+            return [self.get_string(0), self.get_string(1)]
+        if ty_l.startswith('bytes'):
+            # return few small lengths
+            return [self.get_random_bytes(0), self.get_random_bytes(1), self.get_random_bytes(4)]
+        return []
+
+    def iter_param_combinations(self, function_selector: str, max_cases: int = 5):
+        """Yield up to max_cases combinations of argument values for a given function.
+        Priority order: values from arguments_pool -> boundary candidates -> fall back to random.
+        """
+        arg_types = self.interface.get(function_selector, [])
+        if not arg_types:
+            return
+        # Build value lists per argument
+        value_lists = []
+        for idx, ty in enumerate(arg_types):
+            lst = []
+            if function_selector in self.arguments_pool and idx in self.arguments_pool[function_selector]:
+                # take up to max_cases from pool
+                pool_vals = list(self.arguments_pool[function_selector][idx]._q)
+                lst = pool_vals[:max_cases]
+            if not lst:
+                lst = self._candidate_values_for_type(ty)
+            if not lst:
+                # final fallback to a single random value
+                lst = [self.get_argument_value_with_recording(ty, function_selector, idx)]
+            value_lists.append(lst)
+
+        # Cartesian product with cap
+        # simple round-robin: pick i-th of each list, wrap if necessary
+        for i in range(max_cases):
+            combo = []
+            for idx, lst in enumerate(value_lists):
+                if not lst:
+                    combo.append(None)
+                else:
+                    combo.append(lst[i % len(lst)])
+            yield combo
         input = {
             "account": self.get_random_account(function),
             "contract": self.contract,

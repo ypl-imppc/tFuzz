@@ -6,7 +6,7 @@ contract Test2 {
         uint goal_ = t1.getGoal();
         if (3000 == goal_) {
             // 时间戳依赖（漏洞点）：仍然依赖区块时间
-            if (block.timestamp % 15 == 0) { // winner    //bug
+            if (block.timestamp % 15 == 0) { // winner
                 // 在 0.8+ 里需要显式转换为 payable
                 payable(msg.sender).transfer(goal_);
             }

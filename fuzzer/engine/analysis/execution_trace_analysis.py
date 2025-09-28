@@ -719,6 +719,19 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.logger.info(msg)
         msg = 'Total execution time: \t {:.2f} seconds'.format(execution_delta)
         self.logger.info(msg)
+
+        # Optional: dump parameter usage snapshot
+        try:
+            gen = getattr(population, 'indv_generator', None)
+            if gen and hasattr(gen, 'param_usage') and gen.param_usage:
+                self.logger.title('Parameter usage snapshot:')
+                for fsel, slots in gen.param_usage.items():
+                    for idx, meta in slots.items():
+                        t = meta.get('type', '')
+                        vals = list(meta.get('values', []))[:5]
+                        self.logger.info(f"  {fsel}[{idx}] ({t}) -> examples: {vals}")
+        except Exception:
+            pass
         msg = 'Total memory consumption: \t {:.2f} MB'.format(psutil.Process(os.getpid()).memory_info().rss/1024/1024)
         self.logger.info(msg)
 
