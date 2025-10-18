@@ -316,7 +316,25 @@ class Generator:
             individual[-1]["returndatasize"] = {addr: val}
 
         # 2) 依序添加每个函数调用
-        for selector in sequence:
+        #    将给定序列扩展/截断到固定长度（依据设置），满足“长度为 N”的初始测试案例要求
+        desired_len = max(1, int(getattr(settings, 'MAX_INDIVIDUAL_LENGTH', 10)))
+        flat_seq = list(sequence) if sequence else []
+        if not flat_seq:
+            # 若序列为空，退化为随机函数选择子
+            try:
+                fsel, _ = self.get_random_function_with_argument_types()
+                flat_seq = [fsel]
+            except Exception:
+                flat_seq = []
+        # 重复拼接直至长度满足，然后截断
+        expanded = []
+        while len(expanded) < desired_len:
+            expanded.extend(flat_seq)
+            if not flat_seq:  # 避免死循环
+                break
+        expanded = expanded[:desired_len]
+
+        for selector in expanded:
             if selector not in self.interface:
                 # 防御：若序列中有不在 interface 的条目，跳过
                 continue

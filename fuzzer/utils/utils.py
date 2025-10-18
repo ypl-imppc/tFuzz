@@ -65,41 +65,64 @@ def run_command(cmd):
     return p.communicate()[0]
 
 def compile(solc_version, evm_version, source_code_file):
+    """
+    Compile Solidity source via standard-json with robust solc version handling.
+    Accepts either a semantic_version.Version or a string like '0.4.26'/'v0.4.26'/'0.4'.
+    Falls back to install_solc_pragma to resolve latest patch for a given major.minor.
+    """
     out = None
-    source_code = ""
     with open(source_code_file, 'r') as file:
         source_code = file.read()
     try:
-        if not str(solc_version).startswith("v"):
-            solc_version = "v"+str(solc_version.truncate())
-        if not solc_version in solcx.get_installed_solc_versions():
-            solcx.install_solc(solc_version)
-        solcx.set_solc_version(solc_version, True)
+        # Normalize solc version
+        exact = None
+        if hasattr(solc_version, 'truncate'):
+            # semantic_version.Version
+            mm = str(solc_version.truncate())  # e.g., '0.8'
+            # Resolve to latest patch for this major.minor
+            resolved = solcx.install_solc_pragma('^' + mm)
+            exact = 'v' + str(resolved)
+        elif isinstance(solc_version, str):
+            v = solc_version.strip()
+            if v.startswith('v'):
+                v = v[1:]
+            # If only major.minor provided, resolve latest patch
+            parts = v.split('.')
+            if len(parts) == 2:
+                resolved = solcx.install_solc_pragma('^' + v)
+                exact = 'v' + str(resolved)
+            else:
+                exact = 'v' + v
+        else:
+            # Unknown type -> try default pragma for 0.4.x
+            resolved = solcx.install_solc_pragma('^0.4.26')
+            exact = 'v' + str(resolved)
+
+        if exact not in solcx.get_installed_solc_versions():
+            solcx.install_solc(exact)
+        solcx.set_solc_version(exact, True)
+
         out = solcx.compile_standard({
             'language': 'Solidity',
             'sources': {source_code_file: {'content': source_code}},
             'settings': {
-                "optimizer": {
-                    "enabled": True,
-                    "runs": 200
-                },
-                "evmVersion": evm_version,
-                "outputSelection": {
+                'optimizer': {'enabled': True, 'runs': 200},
+                'evmVersion': evm_version,
+                'outputSelection': {
                     source_code_file: {
-                        "*":
-                            [
-                                "abi",
-                                "evm.deployedBytecode",
-                                "evm.bytecode.object",
-                                "evm.legacyAssembly",
-                            ],
+                        '*': [
+                            'abi',
+                            'evm.deployedBytecode',
+                            'evm.bytecode.object',
+                            'evm.legacyAssembly',
+                        ],
                     }
                 }
             }
         }, allow_paths='.')
     except Exception as e:
-        print("Error: Solidity compilation failed!")
-        print(e.message)
+        print('Error: Solidity compilation failed!')
+        print(e)
     return out
 
 def get_interface_from_abi(abi):

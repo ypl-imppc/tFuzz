@@ -27,8 +27,8 @@ GAS_LIMIT = 4500000
 GAS_PRICE = 10
 # Default account balance
 ACCOUNT_BALANCE = 100000000*(10**18)
-# Maximum length of individuals
-MAX_INDIVIDUAL_LENGTH = 5
+# Maximum length of individuals (function-call sequence length target)
+MAX_INDIVIDUAL_LENGTH = 10
 # Logging level
 LOGGING_LEVEL = logging.INFO
 # Block height

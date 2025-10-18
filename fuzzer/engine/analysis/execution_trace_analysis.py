@@ -118,6 +118,9 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         indv.data_dependencies = []
         contract_address = None
 
+        # Initialize dynamic feature-path counters for this individual
+        feature_hits = {"KA1": 0, "KA2": 0, "KA3": 0}
+
         env.detector_executor.initialize_detectors()
 
         for transaction_index, test in enumerate(indv.solution):
@@ -167,6 +170,32 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                 env.detector_executor.run_detectors(previous_instruction, instruction, env.results["errors"],
                                                 env.symbolic_taint_analyzer.get_tainted_record(index=-2), indv, env, previous_branch,
                                                 transaction_index)
+
+                # --- Dynamic feature-path coverage collection ---
+                try:
+                    op = instruction.get("op")
+                    # KA3: time references -> TIMESTAMP
+                    if op == "TIMESTAMP":
+                        feature_hits["KA3"] += 1
+                    # KA2: arithmetic operations
+                    elif op in {"ADD", "MUL", "SUB", "DIV", "SDIV", "MOD", "SMOD", "ADDMOD", "MULMOD", "EXP", "SHL", "SHR", "SAR",
+                                 "LT", "GT", "SLT", "SGT", "EQ", "ISZERO", "AND", "OR", "XOR", "NOT"}:
+                        feature_hits["KA2"] += 1
+                    # KA1: value-bearing external calls -> CALL with non-zero value argument
+                    elif op == "CALL":
+                        st = instruction.get("stack", [])
+                        # CALL pops 7 args: gas,to,value,inOffset,inSize,outOffset,outSize
+                        # Value is the 5th from top of stack (index -5)
+                        if isinstance(st, list) and len(st) >= 7:
+                            try:
+                                call_value = convert_stack_value_to_int(st[-5])
+                                if call_value and int(call_value) > 0:
+                                    feature_hits["KA1"] += 1
+                            except Exception:
+                                pass
+                except Exception:
+                    # Never let feature collection break execution analysis
+                    pass
 
                 # If constructor, we don't have to take into account the constructor inputs because they will be part of the
                 # state. We don't have to compute the code coverage, because the code is not the deployed one. We don't need
@@ -452,6 +481,13 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
 
             if not result.is_error and not transaction["to"]:
                 contract_address = encode_hex(result.msg.storage_address)
+
+        # Persist dynamic feature-path metrics for this individual
+        try:
+            env.individual_feature_hits[indv.hash] = dict(feature_hits)
+            env.individual_feature_counts[indv.hash] = int(sum(feature_hits.values()))
+        except Exception:
+            pass
 
         env.individual_branches[indv.hash] = branches
 
@@ -754,6 +790,20 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.env.results["address_under_test"] = self.env.population.indv_generator.contract
         self.env.results["seed"] = self.env.seed
 
+        # Record best individual by feature-path fitness and its summary
+        try:
+            best = population.best_indv(engine.fitness)
+            self.env.results.setdefault("feature_coverage", {})
+            self.env.results["feature_coverage"].update({
+                "best_count": int(self.env.individual_feature_counts.get(best.hash, 0)),
+                "best_hits": self.env.individual_feature_hits.get(best.hash, {}),
+                "best_sequence_length": len(getattr(best, 'chromosome', [])),
+            })
+            # Also expose the best test case (chromosome) for reproducibility
+            self.env.results["best_test_case"] = getattr(best, 'chromosome', [])
+        except Exception:
+            pass
+
         #  Write results to file
         if self.env.args.results:
             results = {}
@@ -774,3 +824,10 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
 
         diff = list(set(self.env.code_coverage).symmetric_difference(set([hex(x) for x in self.env.overall_pcs])))
         self.logger.debug("Instructions not executed: %s", sorted(diff))
+
+        # Store feature coverage results for this individual
+        try:
+            env.individual_feature_hits[indv.hash] = dict(feature_hits)
+            env.individual_feature_counts[indv.hash] = sum(feature_hits.values())
+        except Exception:
+            pass

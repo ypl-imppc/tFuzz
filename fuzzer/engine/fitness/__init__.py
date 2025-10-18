@@ -2,8 +2,19 @@
 # -*- coding: utf-8 -*-
 
 def fitness_function(indv, env):
+    """
+    Feature-path guided fitness as per requirements:
+    Fitness = number of dynamic feature-path hits in the individual's execution trace.
+    Fallbacks to branch-coverage-based fitness if feature metrics are not available.
+    """
+    # Prefer dynamic feature coverage
+    feat = env.individual_feature_counts.get(indv.hash)
+    if isinstance(feat, (int, float)):
+        return float(feat)
+
+    # Fallback: branch coverage + optional data-dependency component (legacy)
     block_coverage_fitness = compute_branch_coverage_fitness(env.individual_branches[indv.hash], env.code_coverage)
-    if env.args.data_dependency:
+    if getattr(env, 'args', None) and getattr(env.args, 'data_dependency', 0):
         data_dependency_fitness = compute_data_dependency_fitness(indv, env.data_dependencies)
         return block_coverage_fitness + data_dependency_fitness
     return block_coverage_fitness

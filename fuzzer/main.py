@@ -489,7 +489,18 @@ def main():
     # Compile source code to get deployment bytecode, runtime bytecode and ABI
     if args.source:
         if args.source.endswith(".sol"):
+            # Try to compile with requested version; if it fails, attempt a small set of common versions
             compiler_output = compile(args.solc_version, settings.EVM_VERSION, args.source)
+            if not compiler_output:
+                for ver in ("0.4.26", "0.5.17", "0.6.12", "0.7.6", "0.8.26"):
+                    try:
+                        compiler_output = compile(ver, settings.EVM_VERSION, args.source)
+                        if compiler_output:
+                            logger.info(f"Auto-selected solc {ver} for source {args.source}")
+                            args.solc_version = ver
+                            break
+                    except Exception:
+                        pass
             if not compiler_output:
                 logger.error("No compiler output for: " + args.source)
                 sys.exit(-1)

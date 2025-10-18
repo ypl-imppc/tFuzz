@@ -19,4 +19,10 @@ class FuzzingEnvironment:
 
         self.data_dependencies = dict()
 
+        # Feature-path coverage (dynamic) per individual
+        # individual_feature_hits[indv_hash] = {"KA1": int, "KA2": int, "KA3": int}
+        # individual_feature_counts[indv_hash] = total int count for fitness
+        self.individual_feature_hits = dict()
+        self.individual_feature_counts = dict()
+
         self.__dict__.update(kwargs)
