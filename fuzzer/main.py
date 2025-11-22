@@ -359,6 +359,50 @@ class Fuzzer:
         except Exception as _e:
             self.logger.debug(f"Param seeding skipped: {type(_e).__name__}: {_e}")
 
+        # Ensure cross-contract calls can target the helper contracts we deployed from the same source file
+        try:
+            helper_addrs = list(getattr(self.env, "deployed_contracts", {}).values())
+            if not helper_addrs and self.args.source:
+                # Fallback: deploy non-target contracts from compiler output so their addresses are available
+                try:
+                    co = compile(self.args.solc_version, settings.EVM_VERSION, self.args.source)
+                    for _cname, _cblob in (co.get('contracts', {}).get(self.args.source, {}) or {}).items():
+                        if _cname == self.contract_name:
+                            continue
+                        bc = (((_cblob or {}).get('evm', {}) or {}).get('bytecode', {}) or {}).get('object')
+                        if bc:
+                            res = self.instrumented_evm.deploy_contract(self.instrumented_evm.accounts[0], bc)
+                            if not res.is_error:
+                                addr = encode_hex(res.msg.storage_address)
+                                helper_addrs.append(addr)
+                                if addr not in self.instrumented_evm.accounts:
+                                    self.instrumented_evm.accounts.append(addr)
+                except Exception as _fallback_e:
+                    self.logger.debug(f"Helper contract fallback deploy failed: {type(_fallback_e).__name__}: {_fallback_e}")
+            if hasattr(generator, "seed_argument_pools_from_typedict") and (helper_addrs or self.instrumented_evm.accounts):
+                if helper_addrs:
+                    # Prioritize helper contract addresses for address-type params
+                    self.instrumented_evm.accounts = helper_addrs + [a for a in self.instrumented_evm.accounts if a not in helper_addrs]
+                    generator.seed_argument_pools_from_typedict({"address": helper_addrs})
+                for _func, _arg_types in self.interface.items():
+                    if _func == "constructor":
+                        continue
+                    for _idx, _ty in enumerate(_arg_types):
+                        if isinstance(_ty, str) and _ty.startswith("address"):
+                            for _addr in helper_addrs or []:
+                                try:
+                                    generator.add_argument_to_pool(_func, _idx, _addr)
+                                except Exception:
+                                    pass
+                            for _acc in self.instrumented_evm.accounts:
+                                try:
+                                    generator.add_argument_to_pool(_func, _idx, _acc)
+                                except Exception:
+                                    pass
+                self.logger.debug(f"Seeded address pool with helper contracts: {helper_addrs}")
+        except Exception as _e:
+            self.logger.debug(f"Helper address seeding skipped: {type(_e).__name__}: {_e}")
+
         # Create initial population (FAGSV with AST -> fallback to ABI -> fallback to random)
         size = 2 * len(self.interface)
         pop_size = settings.POPULATION_SIZE if settings.POPULATION_SIZE else size

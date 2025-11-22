@@ -102,11 +102,14 @@ def compile(solc_version, evm_version, source_code_file):
             solcx.install_solc(exact)
         solcx.set_solc_version(exact, True)
 
+        # Disable optimizer to avoid compiling away potentially vulnerable code paths
+        # (e.g., local arithmetic that is not stored/returned). Keeping the raw
+        # instructions intact improves bug detection coverage.
         out = solcx.compile_standard({
             'language': 'Solidity',
             'sources': {source_code_file: {'content': source_code}},
             'settings': {
-                'optimizer': {'enabled': True, 'runs': 200},
+                'optimizer': {'enabled': False},
                 'evmVersion': evm_version,
                 'outputSelection': {
                     source_code_file: {
