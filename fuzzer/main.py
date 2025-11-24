@@ -379,6 +379,9 @@ class Fuzzer:
                                     self.instrumented_evm.accounts.append(addr)
                 except Exception as _fallback_e:
                     self.logger.debug(f"Helper contract fallback deploy failed: {type(_fallback_e).__name__}: {_fallback_e}")
+            # Expose helper addresses to the generator so it can prioritize valid contract instances
+            if hasattr(generator, "preferred_addresses"):
+                generator.preferred_addresses = list(helper_addrs)
             if hasattr(generator, "seed_argument_pools_from_typedict") and (helper_addrs or self.instrumented_evm.accounts):
                 if helper_addrs:
                     # Prioritize helper contract addresses for address-type params
@@ -389,14 +392,16 @@ class Fuzzer:
                         continue
                     for _idx, _ty in enumerate(_arg_types):
                         if isinstance(_ty, str) and _ty.startswith("address"):
-                            for _addr in helper_addrs or []:
-                                try:
-                                    generator.add_argument_to_pool(_func, _idx, _addr)
-                                except Exception:
-                                    pass
                             for _acc in self.instrumented_evm.accounts:
                                 try:
                                     generator.add_argument_to_pool(_func, _idx, _acc)
+                                except Exception:
+                                    pass
+                            # Re-append helper addresses so they sit at the end of the circular pool,
+                            # making them the first candidates returned by head_and_rotate().
+                            for _addr in helper_addrs or []:
+                                try:
+                                    generator.add_argument_to_pool(_func, _idx, _addr)
                                 except Exception:
                                     pass
                 self.logger.debug(f"Seeded address pool with helper contracts: {helper_addrs}")

@@ -168,6 +168,8 @@ class Generator:
         self.argument_array_sizes_pool = {}
         self.strings_pool = CircularSet()
         self.bytes_pool = CircularSet()
+        # Addresses known to be valid contract instances (e.g., helper contracts deployed from the same source file)
+        self.preferred_addresses = []
         # Parameter usage accounting: {function_selector: {index: {"type": str, "values": set()}}}
         self.param_usage = {}
         # Parameter selection strategy hint: 'mixed'|'basic'|'boundary'
@@ -239,7 +241,13 @@ class Generator:
                         self.arguments_pool[func_sel] = dict()
                     if idx not in self.arguments_pool[func_sel]:
                         self.arguments_pool[func_sel][idx] = CircularSet()
-                    for v in type_dict[key]:
+                    seed_vals = list(type_dict[key])
+                    if key in ("uint", "int"):
+                        try:
+                            seed_vals.extend(self._candidate_values_for_type(ty, limit=6))
+                        except Exception:
+                            pass
+                    for v in seed_vals:
                         self.arguments_pool[func_sel][idx].add(v)
     
 
@@ -386,10 +394,41 @@ class Generator:
         if ty_l.startswith('bool'):
             return [False, True]
         if ty_l.startswith('uint'):
-            # few canonical unsigned
-            return [0, 1, 2, 255, 256]
+            # include near-zero and near-maximum seeds
+            try:
+                bits = int((ty_l.split('[')[0] or 'uint').replace('uint', '') or '256')
+            except ValueError:
+                bits = 256
+            bytes_len = max(1, min(32, int(bits / 8)))
+            max_val = UINT_MAX.get(bytes_len, UINT_MAX[32])
+            vals = [
+                max_val,
+                max_val - 1,
+                max_val // 2,
+                0,
+                1,
+                2,
+            ]
+            # keep a couple of small-byte boundaries when they fit
+            for v in (255, 256):
+                if v <= max_val:
+                    vals.append(v)
+            # preserve order and limit size
+            seen = []
+            for v in vals:
+                if v not in seen:
+                    seen.append(v)
+            return seen[:limit]
         if ty_l.startswith('int'):
-            return [-1, 0, 1]
+            try:
+                bits = int((ty_l.split('[')[0] or 'int').replace('int', '') or '256')
+            except ValueError:
+                bits = 256
+            bytes_len = max(1, min(32, int(bits / 8)))
+            max_v = INT_MAX.get(bytes_len, INT_MAX[32])
+            min_v = INT_MIN.get(bytes_len, INT_MIN[32])
+            vals = [max_v, min_v, -1, 0, 1]
+            return vals[:limit]
         if ty_l.startswith('address'):
             samp = self.accounts[:]
             return samp[:min(len(samp), max(1, limit))]
@@ -759,6 +798,24 @@ class Generator:
     def _get_random_argument_from_pool(self, function, argument_index):
         return self.arguments_pool[function][argument_index].head_and_rotate()
 
+    def _sample_from_pool_or_random(self, function, argument_index, random_generator, pool_bias=0.6):
+        """
+        Return a value from the argument pool with a given probability; otherwise generate
+        a fresh random value (which is cached back into the pool for future reuse).
+        This prevents the seeded pools (often small constants) from starving boundary cases,
+        which are required to surface arithmetic bugs such as overflows.
+        """
+        try:
+            has_pool = function in self.arguments_pool and argument_index in self.arguments_pool[function]
+            if has_pool and random.random() < pool_bias:
+                return self._get_random_argument_from_pool(function, argument_index)
+            val = random_generator()
+            self.add_argument_to_pool(function, argument_index, val)
+            return val
+        except Exception:
+            # Never break fuzzing because of pool bookkeeping.
+            return random_generator()
+
     def get_random_argument(self, type, function, argument_index):
         # Boolean
         if type.startswith("bool"):
@@ -767,16 +824,11 @@ class Generator:
                 sizes = self._get_array_sizes(argument_index, function, type)
                 array = []
                 for _ in range(sizes[0]):
-                    if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                        if self._get_random_argument_from_pool(function, argument_index) == 0:
-                            array.append(False)
-                        else:
-                            array.append(True)
-                    else:
-                        if random.randint(0, 1) == 0:
-                            array.append(False)
-                        else:
-                            array.append(True)
+                    array.append(self._sample_from_pool_or_random(
+                        function,
+                        argument_index,
+                        lambda: bool(random.randint(0, 1))
+                    ))
                 if len(sizes) > 1:
                     new_array = []
                     for _ in range(sizes[1]):
@@ -785,14 +837,11 @@ class Generator:
                 return array
             # Single value
             else:
-                if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                    if self._get_random_argument_from_pool(function, argument_index) == 0:
-                        return False
-                    return True
-                else:
-                    if random.randint(0, 1) == 0:
-                        return False
-                    return True
+                return self._sample_from_pool_or_random(
+                    function,
+                    argument_index,
+                    lambda: bool(random.randint(0, 1))
+                )
 
         # Unsigned integer
         elif type.startswith("uint"):
@@ -802,10 +851,11 @@ class Generator:
                 sizes = self._get_array_sizes(argument_index, function, type)
                 array = []
                 for _ in range(sizes[0]):
-                    if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                        array.append(self._get_random_argument_from_pool(function, argument_index))
-                    else:
-                        array.append(self.get_random_unsigned_integer(0, UINT_MAX[bytes]))
+                    array.append(self._sample_from_pool_or_random(
+                        function,
+                        argument_index,
+                        lambda: self.get_random_unsigned_integer(0, UINT_MAX[bytes])
+                    ))
                 if len(sizes) > 1:
                     new_array = []
                     for _ in range(sizes[1]):
@@ -814,9 +864,11 @@ class Generator:
                 return array
             # Single value
             else:
-                if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                    return self._get_random_argument_from_pool(function, argument_index)
-                return self.get_random_unsigned_integer(0, UINT_MAX[bytes])
+                return self._sample_from_pool_or_random(
+                    function,
+                    argument_index,
+                    lambda: self.get_random_unsigned_integer(0, UINT_MAX[bytes])
+                )
 
         # Signed integer
         elif type.startswith("int"):
@@ -826,10 +878,11 @@ class Generator:
                 sizes = self._get_array_sizes(argument_index, function, type)
                 array = []
                 for _ in range(sizes[0]):
-                    if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                        array.append(self._get_random_argument_from_pool(function, argument_index))
-                    else:
-                        array.append(self.get_random_signed_integer(INT_MIN[bytes], INT_MAX[bytes]))
+                    array.append(self._sample_from_pool_or_random(
+                        function,
+                        argument_index,
+                        lambda: self.get_random_signed_integer(INT_MIN[bytes], INT_MAX[bytes])
+                    ))
                 if len(sizes) > 1:
                     new_array = []
                     for _ in range(sizes[1]):
@@ -838,21 +891,32 @@ class Generator:
                 return array
             # Single value
             else:
-                if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                    return self._get_random_argument_from_pool(function, argument_index)
-                return self.get_random_signed_integer(INT_MIN[bytes], INT_MAX[bytes])
+                return self._sample_from_pool_or_random(
+                    function,
+                    argument_index,
+                    lambda: self.get_random_signed_integer(INT_MIN[bytes], INT_MAX[bytes])
+                )
 
         # Address
         elif type.startswith("address"):
+            def _pick_address():
+                # Strongly favor known deployed helpers to ensure cross-contract calls succeed.
+                if self.preferred_addresses and random.random() < 0.7:
+                    addr = self.preferred_addresses[0]
+                    self.preferred_addresses = self.preferred_addresses[1:] + [addr]
+                    return addr
+                return random.choice(self.accounts)
             # Array
             if "[" in type and "]" in type:
                 sizes = self._get_array_sizes(argument_index, function, type)
                 array = []
                 for _ in range(sizes[0]):
-                    if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                        array.append(self._get_random_argument_from_pool(function, argument_index))
-                    else:
-                        array.append(random.choice(self.accounts))
+                    array.append(self._sample_from_pool_or_random(
+                        function,
+                        argument_index,
+                        _pick_address,
+                        pool_bias=0.85
+                    ))
                 if len(sizes) > 1:
                     new_array = []
                     for _ in range(sizes[1]):
@@ -861,9 +925,12 @@ class Generator:
                 return array
             # Single value
             else:
-                if function in self.arguments_pool and argument_index in self.arguments_pool[function]:
-                    return self._get_random_argument_from_pool(function, argument_index)
-                return random.choice(self.accounts)
+                return self._sample_from_pool_or_random(
+                    function,
+                    argument_index,
+                    _pick_address,
+                    pool_bias=0.85
+                )
 
         # String
         elif type.startswith("string"):
