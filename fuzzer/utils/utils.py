@@ -124,8 +124,7 @@ def compile(solc_version, evm_version, source_code_file):
             }
         }, allow_paths='.')
     except Exception as e:
-        print('Error: Solidity compilation failed!')
-        print(e)
+        logging.getLogger("Main").debug("Solidity compilation failed: %s: %s", type(e).__name__, e)
     return out
 
 def get_interface_from_abi(abi):

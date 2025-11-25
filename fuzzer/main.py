@@ -74,7 +74,7 @@ def _compile_with_ast(source_path: str, solc_version: str = None):
     使用 standard-json 编译，返回 (output, ast_by_source)
     """
     if solc_version:
-        solcx.install_solc(solc_version, allow_osx=True)
+        solcx.install_solc(solc_version)
         solcx.set_solc_version(solc_version)
     # standard-json
     with open(source_path, "r", encoding="utf-8") as f:
@@ -417,7 +417,7 @@ class Fuzzer:
             sequences = None
             try:
                 # 1) 先尝试 AST 驱动（Phase 2）
-                output, ast_root = _compile_with_ast(self.args.source, solc_version=None)  # 若有 --solc，可传进来
+                output, ast_root = _compile_with_ast(self.args.source, solc_version=str(self.args.solc_version) if self.args.solc_version else None)
                 if ast_root:
                     # 从 AST 里找到目标合约节点；本适配器在 build_contract_info_from_ast 内会再校验
                     ci = build_contract_info_from_ast(self.abi, ast_root, self.contract_name)

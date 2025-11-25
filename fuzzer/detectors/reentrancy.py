@@ -20,17 +20,24 @@ class ReentrancyDetector():
             if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
                 storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
                 self.sloads[storage_index] = current_instruction["pc"], transaction_index
-        # Remember calls with more than 2300 gas and where the value is larger than zero/symbolic or where destination is symbolic
-        elif current_instruction["op"] == "CALL" and self.sloads:
+        # Track CALLs with enough gas/value and tainted destination/value, even if no prior SLOAD was seen.
+        elif current_instruction["op"] == "CALL":
             gas = convert_stack_value_to_int(current_instruction["stack"][-1])
             value = convert_stack_value_to_int(current_instruction["stack"][-3])
-            if gas > 2300 and (value > 0 or tainted_record and tainted_record.stack and tainted_record.stack[-3]):
+            value_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 3 and tainted_record.stack[-3]
+            dest_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 2 and tainted_record.stack[-2]
+            if gas > 2300 and (value > 0 or value_tainted):
                 self.calls.add((current_instruction["pc"], transaction_index))
-            if gas > 2300 and tainted_record and tainted_record.stack and tainted_record.stack[-2]:
+            if gas > 2300 and dest_tainted:
                 self.calls.add((current_instruction["pc"], transaction_index))
-                for pc, index in self.sloads.values():
-                    if pc < current_instruction["pc"]:
-                        return current_instruction["pc"], index
+                # Classic pattern: SLOAD -> CALL -> SSTORE on same slot
+                if self.sloads:
+                    for pc, index in self.sloads.values():
+                        if pc < current_instruction["pc"]:
+                            return current_instruction["pc"], index
+                # Heuristic: tainted destination/value external call with enough gas is reentrancy-prone
+                if value > 0 or value_tainted:
+                    return current_instruction["pc"], transaction_index
         # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
         elif current_instruction["op"] == "SSTORE" and self.calls:
             if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
