@@ -542,9 +542,9 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                         continue
 
                     var_split = str(variable).split("_")
-                    transaction_index = int(var_split[1])
 
                     if str(variable).startswith("balance"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         opt = Optimize()
                         for expression_index in range(len(_d["expression"]) - 1):
@@ -560,13 +560,33 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                             indv_generator.add_balance_to_pool(_function_hash, balance)
 
                     elif str(variable).startswith("blocknumber"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         blocknumber = int(model[variable].as_long())
                         indv_generator.add_blocknumber_to_pool(_function_hash,
                                                                self.env.instrumented_evm.vm.state.block_number)
                         indv_generator.add_blocknumber_to_pool(_function_hash, blocknumber)
 
+                    elif str(variable).startswith("sload"):
+                        try:
+                            _, addr_hex, slot_hex = str(variable).split("_", 2)
+                            slot_int = int(slot_hex, 16) if str(slot_hex).startswith("0x") else int(slot_hex)
+                            addr_hex = addr_hex if str(addr_hex).startswith("0x") else "0x" + str(addr_hex)
+                            addr_bytes = to_canonical_address(addr_hex)
+                            value = int(model[variable].as_long())
+                            self.env.instrumented_evm.storage_emulator.set_storage(addr_bytes, slot_int, value)
+                            try:
+                                if addr_hex not in self.env.symbolic_taint_analyzer.storage:
+                                    self.env.symbolic_taint_analyzer.storage[addr_hex] = {}
+                                self.env.symbolic_taint_analyzer.storage[addr_hex][hex(slot_int)] = [BitVecVal(value, 256)]
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            self.logger.debug("(%s) [symbolic execution : sload ] %s", _d["indv_hash"], e)
+                            continue
+
                     elif str(variable).startswith("call_") or str(variable).startswith("staticcall_"):
+                        transaction_index = int(var_split[1])
                         address = to_normalized_address(var_split[2])
                         old_result = int(var_split[3], 16)
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
@@ -575,6 +595,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                         indv_generator.add_callresult_to_pool(_function_hash, address, new_result)
 
                     elif str(variable).startswith("caller_"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         if model[variable].as_long() > 8 and model[variable].as_long() < 2**160:
                             account_address = normalize_32_byte_hex_address("0x"+hex(model[variable].as_long()).replace("0x", "").zfill(40))
@@ -586,6 +607,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                             indv_generator.add_account_to_pool(_function_hash, account_address)
 
                     elif str(variable).startswith("calldatacopy_"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         parameter_index = int(var_split[2])
                         if "[" in indv_generator.interface[_function_hash][parameter_index]:
@@ -609,6 +631,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                             indv_generator.add_argument_to_pool(_function_hash, parameter_index, argument)
 
                     elif str(variable).startswith("calldataload_"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         parameter_index = int(var_split[2])
                         # TODO: THE SOLVER DOES NOT CONSIDER THE MAX SIZE OF THE VARIABLE
@@ -670,6 +693,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                         indv_generator.add_argument_to_pool(_function_hash, parameter_index, argument)
 
                     elif str(variable).startswith("callvalue_"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         amount = model[variable].as_long()
                         if amount > settings.ACCOUNT_BALANCE:
@@ -680,11 +704,13 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                         indv_generator.add_amount_to_pool(_function_hash, amount)
 
                     elif str(variable).startswith("gas_"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         indv_generator.add_gaslimit_to_pool(_function_hash, _d["chromosome"][transaction_index]["gaslimit"])
                         indv_generator.add_gaslimit_to_pool(_function_hash, model[variable].as_long())
 
                     elif str(variable).startswith("inputarraysize"):
+                        transaction_index = int(var_split[1])
                         opt = Optimize()
                         for expression_index in range(len(_d["expression"]) - 1):
                             opt.add(_d["expression"][expression_index])
@@ -700,6 +726,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                             indv_generator.add_parameter_array_size(_function_hash, parameter_index, array_size)
 
                     elif str(variable).startswith("timestamp"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         timestamp = int(model[variable].as_long())
                         indv_generator.add_timestamp_to_pool(_function_hash, self.env.instrumented_evm.vm.state.timestamp)
@@ -709,12 +736,14 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                         pass
 
                     elif str(variable).startswith("extcodesize"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         _address = to_normalized_address(var_split[2])
                         indv_generator.add_extcodesize_to_pool(_function_hash, _address, int(var_split[3], 16))
                         indv_generator.add_extcodesize_to_pool(_function_hash, _address, int(model[variable].as_long()))
 
                     elif str(variable).startswith("returndatasize"):
+                        transaction_index = int(var_split[1])
                         _function_hash = _d["chromosome"][transaction_index]["arguments"][0]
                         _address = to_normalized_address(var_split[2])
                         _size = int(var_split[3], 16)

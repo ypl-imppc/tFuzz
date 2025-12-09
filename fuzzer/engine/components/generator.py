@@ -718,13 +718,22 @@ class Generator:
         return self.amounts_pool[function].head_and_rotate()
 
     def get_random_amount(self, function):
-        if function in self.amounts_pool:
-            amount = self.get_random_amount_from_pool(function)
-        else:
-            amount = random.randint(0, 1)
-            self.add_amount_to_pool(function, amount)
-            self.add_amount_to_pool(function, 1 - amount)
-        return amount
+        if function not in self.amounts_pool:
+            max_uint = UINT_MAX[32]
+            max_payable = max(0, settings.ACCOUNT_BALANCE - settings.GAS_LIMIT * settings.GAS_PRICE)
+            seed_amounts = [
+                0,
+                1,
+                2,
+                max_payable,
+                max_payable - 1 if max_payable > 0 else 0,
+                max_payable // 2 if max_payable > 1 else 1,
+            ]
+            for amt in seed_amounts:
+                # Ensure non-negative values only
+                if amt >= 0:
+                    self.add_amount_to_pool(function, amt)
+        return self.get_random_amount_from_pool(function)
 
     #
     # STRINGS

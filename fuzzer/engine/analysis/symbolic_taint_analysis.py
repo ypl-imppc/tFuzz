@@ -409,6 +409,14 @@ class SymbolicTaintAnalyzer:
                     taint = storage[record.address][index]
                 else:
                     taint += storage[record.address][index]
+        # If no taint is known for this storage slot, introduce a symbolic variable so
+        # the solver can explore both branches and we can later seed a concrete value.
+        if not taint:
+            sym_name = "_".join(["sload", str(record.address), str(index)])
+            taint = [BitVec(sym_name, 256)]
+            if record.address not in storage:
+                storage[record.address] = {}
+            storage[record.address][index] = taint
         record.stack.append(taint)
 
     @staticmethod

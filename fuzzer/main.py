@@ -198,9 +198,36 @@ class Fuzzer:
                                       cfg=cfg,
                                       abi=abi)
 
+    @staticmethod
+    def _build_constant_return_runtime(value: int) -> bytes:
+        """
+        Build a tiny runtime that returns a fixed 32-byte constant for any call.
+        Used to predeploy stub contracts so cross-contract conditions can be satisfied.
+        """
+        bounded = value % (1 << 256)
+        val_bytes = bounded.to_bytes(32, byteorder="big", signed=False)
+        # PUSH32 <val> ; MSTORE(0, val) ; RETURN 32 bytes from offset 0
+        return bytes([0x7f]) + val_bytes + bytes([0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3])
+
     def run(self):
         contract_address = None
         self.instrumented_evm.create_fake_accounts()
+
+        # Predeploy simple constant-return stub contracts to explore inter-contract conditions.
+        try:
+            stub_values = [0, 1, 2, 10, 1000, 3000, 4000, 10000]
+            self.env.stub_contracts = []
+            for idx, cval in enumerate(stub_values):
+                runtime_code = Fuzzer._build_constant_return_runtime(cval)
+                stub_address = self.instrumented_evm.create_fake_account(f"0xf00dbabe{idx:032x}", code=runtime_code)
+                self.instrumented_evm.accounts.append(stub_address)
+                self.env.other_contracts.append(to_canonical_address(stub_address))
+                self.env.len_overall_pcs_with_children += 1  # one RETURN instruction per stub
+                self.env.stub_contracts.append(stub_address)
+            if stub_values:
+                self.logger.debug("Seeded constant-return stubs: %s", self.env.stub_contracts)
+        except Exception as _stub_e:
+            self.logger.debug(f"Stub contract seeding skipped: {type(_stub_e).__name__}: {_stub_e}")
 
         # Build XCFG from AST (and pre-deploy auxiliary contracts for cross-contract calls)
         ast_output = None

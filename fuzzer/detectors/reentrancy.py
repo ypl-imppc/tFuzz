@@ -22,10 +22,14 @@ class ReentrancyDetector():
                 self.sloads[storage_index] = current_instruction["pc"], transaction_index
         # Track CALLs with enough gas/value and tainted destination/value, even if no prior SLOAD was seen.
         elif current_instruction["op"] == "CALL":
-            gas = convert_stack_value_to_int(current_instruction["stack"][-1])
-            value = convert_stack_value_to_int(current_instruction["stack"][-3])
-            value_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 3 and tainted_record.stack[-3]
-            dest_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 2 and tainted_record.stack[-2]
+            stack = current_instruction.get("stack", [])
+            if len(stack) < 7:
+                return None, None
+            # CALL arguments (top of stack is outSize): [gas, to, value, inOffset, inSize, outOffset, outSize]
+            gas = convert_stack_value_to_int(stack[-7])
+            value = convert_stack_value_to_int(stack[-5])
+            value_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 5 and tainted_record.stack[-5]
+            dest_tainted = tainted_record and tainted_record.stack and len(tainted_record.stack) >= 6 and tainted_record.stack[-6]
             if gas > 2300 and (value > 0 or value_tainted):
                 self.calls.add((current_instruction["pc"], transaction_index))
             if gas > 2300 and dest_tainted:
