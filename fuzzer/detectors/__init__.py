@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import time
+import re
 
 from utils.utils import print_individual_solution_as_transaction, initialize_logger
 
@@ -156,6 +157,10 @@ class DetectorExecutor:
             print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         pc, index = self.reentrancy_detector.detect_reentrancy(tainted_record, current_instruction, transaction_index)
+        if pc and self.source_map:
+            line_text = self.source_map.get_buggy_line(pc)
+            if line_text and not re.search(r"\.call\.value|\.transfer\(|\.send\(|call\{value", line_text):
+                pc = None
         if pc and DetectorExecutor.add_error(errors, pc, "Reentrancy", individual, mfe, self.reentrancy_detector, self.source_map):
             color = DetectorExecutor.get_color_for_severity(self.reentrancy_detector.severity)
             self.logger.title(color+"-----------------------------------------------------")

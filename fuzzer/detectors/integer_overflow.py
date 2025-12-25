@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import re
 from z3 import BitVec
 from utils.utils import convert_stack_value_to_int, convert_stack_value_to_hex
 
@@ -13,6 +14,30 @@ class IntegerOverflowDetector():
         self.severity = "High"
         self.overflows = {}
         self.underflows = {}
+
+    def _taint_is_numeric(self, taint_index, individual, transaction_index):
+        if not taint_index:
+            return False
+        if "callvalue" in taint_index:
+            return True
+        if "calldataload" not in taint_index:
+            return False
+        _function_hash = None
+        try:
+            _function_hash = individual.chromosome[transaction_index]["arguments"][0]
+        except Exception:
+            return False
+        for tx_str, arg_str in re.findall(r"calldataload_(\d+)_(\d+)", taint_index):
+            try:
+                if int(tx_str) != transaction_index:
+                    continue
+                arg_idx = int(arg_str)
+                arg_type = individual.generator.interface[_function_hash][arg_idx]
+                if arg_type.startswith(("uint", "int")):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def detect_integer_overflow(self, mfe, tainted_record, previous_instruction, current_instruction, individual, transaction_index):
         # Skip the specific Solidity pattern used to negate values (NOT + ADD),
@@ -56,7 +81,7 @@ class IntegerOverflowDetector():
                     pass
 
                 for index in taint_sources:
-                    if "calldataload" in index or "callvalue" in index:
+                    if self._taint_is_numeric(index, individual, transaction_index):
                         _function_hash = individual.chromosome[transaction_index]["arguments"][0]
                         _is_string = False
                         for _argument_index in [int(a.split("_")[-1]) for a in index.split() if a.startswith("calldataload_"+str(transaction_index)+"_")]:
@@ -74,7 +99,7 @@ class IntegerOverflowDetector():
             else:
                 # Even if we didn't witness a wrap, user-controlled additions are overflow-prone.
                 for index in taint_sources:
-                    if "calldataload" in index or "callvalue" in index:
+                    if self._taint_is_numeric(index, individual, transaction_index):
                         self.overflows[index] = previous_instruction["pc"], transaction_index
                         return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
@@ -139,7 +164,7 @@ class IntegerOverflowDetector():
                             break
 
             # If the operands originate from calldata/callvalue, treat it as a potential underflow immediately
-            if index and ("calldataload" in index or "callvalue" in index):
+            if index and self._taint_is_numeric(index, individual, transaction_index):
                 self.underflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "underflow"
 

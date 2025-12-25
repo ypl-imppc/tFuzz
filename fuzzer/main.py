@@ -11,7 +11,7 @@ import logging
 import argparse
 import re
 
-from eth_utils import encode_hex, decode_hex, to_canonical_address
+from eth_utils import encode_hex, decode_hex, to_canonical_address, keccak
 from z3 import Solver
 
 from evm import InstrumentedEVM
@@ -209,13 +209,39 @@ class Fuzzer:
         # PUSH32 <val> ; MSTORE(0, val) ; RETURN 32 bytes from offset 0
         return bytes([0x7f]) + val_bytes + bytes([0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3])
 
+    def _seed_mapping_slots(self, contract_address: str, slot_indices=(0, 1, 2, 3), seed_value: int = 1):
+        """
+        Heuristic: pre-seed common mapping(address => uint/bool) slots so branches that
+        check balances can be exercised without an explicit deposit function.
+        """
+        if not contract_address:
+            return
+        try:
+            contract_addr = to_canonical_address(contract_address)
+        except Exception:
+            return
+        for acc in self.instrumented_evm.accounts:
+            if not isinstance(acc, str):
+                continue
+            try:
+                key = to_canonical_address(acc)
+            except Exception:
+                continue
+            key_padded = key.rjust(32, b"\x00")
+            for slot_idx in slot_indices:
+                slot_bytes = int(slot_idx).to_bytes(32, byteorder="big", signed=False)
+                slot_hash = keccak(key_padded + slot_bytes)
+                slot_int = int.from_bytes(slot_hash, byteorder="big", signed=False)
+                self.instrumented_evm.storage_emulator.set_storage(contract_addr, slot_int, seed_value)
+
     def run(self):
         contract_address = None
         self.instrumented_evm.create_fake_accounts()
 
         # Predeploy simple constant-return stub contracts to explore inter-contract conditions.
         try:
-            stub_values = [0, 1, 2, 10, 1000, 3000, 4000, 10000]
+            # Prioritize values that satisfy common inter-contract conditions.
+            stub_values = [4000, 10000, 3000, 1000, 10, 2, 1, 0]
             self.env.stub_contracts = []
             for idx, cval in enumerate(stub_values):
                 runtime_code = Fuzzer._build_constant_return_runtime(cval)
@@ -325,12 +351,37 @@ class Fuzzer:
         if self.args.abi:
             contract_address = self.args.contract
 
+        # Heuristic: seed mapping slots when source includes mappings and external value transfers.
+        try:
+            if contract_address and self.args.source and os.path.isfile(self.args.source):
+                with open(self.args.source, "r", encoding="utf-8") as _sf:
+                    _src_text = _sf.read()
+                if "mapping(" in _src_text and ".call.value" in _src_text:
+                    self._seed_mapping_slots(contract_address)
+                    self.logger.debug("Seeded mapping slots for %s", contract_address)
+        except Exception as _seed_e:
+            self.logger.debug(f"Mapping slot seeding skipped: {type(_seed_e).__name__}: {_seed_e}")
+
         self.instrumented_evm.create_snapshot()
 
         generator = Generator(interface=self.interface,
                             bytecode=self.deployement_bytecode,
                             accounts=self.instrumented_evm.accounts,
                             contract=contract_address)
+        # Force 0-value transactions for non-payable functions to avoid immediate reverts.
+        try:
+            for entry in (self.abi or []):
+                if entry.get("type") != "function":
+                    continue
+                is_payable = entry.get("stateMutability") == "payable" or entry.get("payable") is True
+                if is_payable:
+                    continue
+                sig = entry.get("name", "") + "(" + ",".join([i.get("type", "") for i in entry.get("inputs", [])]) + ")"
+                if sig != "()":
+                    selector = keccak(sig.encode())[:4].hex()
+                    generator.add_amount_to_pool(selector, 0)
+        except Exception as _e:
+            self.logger.debug(f"Payable check skipped: {type(_e).__name__}: {_e}")
         try:
             if self.args.source and os.path.isfile(self.args.source):
                 from engine.components.contract_scraper import create_contractpools
@@ -389,6 +440,7 @@ class Fuzzer:
         # Ensure cross-contract calls can target the helper contracts we deployed from the same source file
         try:
             helper_addrs = list(getattr(self.env, "deployed_contracts", {}).values())
+            stub_addrs = list(getattr(self.env, "stub_contracts", []) or [])
             if not helper_addrs and self.args.source:
                 # Fallback: deploy non-target contracts from compiler output so their addresses are available
                 try:
@@ -408,12 +460,21 @@ class Fuzzer:
                     self.logger.debug(f"Helper contract fallback deploy failed: {type(_fallback_e).__name__}: {_fallback_e}")
             # Expose helper addresses to the generator so it can prioritize valid contract instances
             if hasattr(generator, "preferred_addresses"):
-                generator.preferred_addresses = list(helper_addrs)
-            if hasattr(generator, "seed_argument_pools_from_typedict") and (helper_addrs or self.instrumented_evm.accounts):
+                preferred_addrs = []
+                for _addr in (stub_addrs + helper_addrs):
+                    if _addr and _addr not in preferred_addrs:
+                        preferred_addrs.append(_addr)
+                generator.preferred_addresses = list(preferred_addrs)
+            if hasattr(generator, "seed_argument_pools_from_typedict") and (helper_addrs or stub_addrs or self.instrumented_evm.accounts):
                 if helper_addrs:
                     # Prioritize helper contract addresses for address-type params
                     self.instrumented_evm.accounts = helper_addrs + [a for a in self.instrumented_evm.accounts if a not in helper_addrs]
-                    generator.seed_argument_pools_from_typedict({"address": helper_addrs})
+                preferred_addrs = []
+                for _addr in (stub_addrs + helper_addrs):
+                    if _addr and _addr not in preferred_addrs:
+                        preferred_addrs.append(_addr)
+                if preferred_addrs:
+                    generator.seed_argument_pools_from_typedict({"address": preferred_addrs})
                 for _func, _arg_types in self.interface.items():
                     if _func == "constructor":
                         continue
@@ -424,14 +485,14 @@ class Fuzzer:
                                     generator.add_argument_to_pool(_func, _idx, _acc)
                                 except Exception:
                                     pass
-                            # Re-append helper addresses so they sit at the end of the circular pool,
+                            # Re-append preferred addresses so they sit at the end of the circular pool,
                             # making them the first candidates returned by head_and_rotate().
-                            for _addr in helper_addrs or []:
+                            for _addr in preferred_addrs or []:
                                 try:
                                     generator.add_argument_to_pool(_func, _idx, _addr)
                                 except Exception:
                                     pass
-                self.logger.debug(f"Seeded address pool with helper contracts: {helper_addrs}")
+                self.logger.debug(f"Seeded address pool with preferred contracts: {preferred_addrs}")
         except Exception as _e:
             self.logger.debug(f"Helper address seeding skipped: {type(_e).__name__}: {_e}")
 

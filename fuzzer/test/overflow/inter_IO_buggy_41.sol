@@ -1,6 +1,6 @@
 contract Test2{
     function bug_intou_inter(address callee, uint b) public payable returns (uint){
-    address t1 = Test1(callee);
+    Test1 t1 = Test1(callee);
     uint goal_ = t1.getGoal();
     if(!t1.testbool(5000)) {
         b = msg.value - goal_;  // underflow bug inter contract
