@@ -177,6 +177,28 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                     # KA3: time references -> TIMESTAMP
                     if op == "TIMESTAMP":
                         feature_hits["KA3"] += 1
+                        try:
+                            func_hash = indv.chromosome[transaction_index]["arguments"][0]
+                            gen = getattr(indv, "generator", None)
+                            if gen:
+                                base_ts = getattr(env.instrumented_evm.vm.state, "timestamp", 0)
+                                seed_values = [base_ts, 0, 1]
+                                for delta in (1, 60, 3600, 86400):
+                                    seed_values.append(base_ts + delta)
+                                    if base_ts > delta:
+                                        seed_values.append(base_ts - delta)
+                                seen = set()
+                                for ts in seed_values:
+                                    try:
+                                        ts_int = int(ts)
+                                    except Exception:
+                                        continue
+                                    if ts_int < 0 or ts_int in seen:
+                                        continue
+                                    seen.add(ts_int)
+                                    gen.add_timestamp_to_pool(func_hash, ts_int)
+                        except Exception:
+                            pass
                     # KA2: arithmetic operations
                     elif op in {"ADD", "MUL", "SUB", "DIV", "SDIV", "MOD", "SMOD", "ADDMOD", "MULMOD", "EXP", "SHL", "SHR", "SAR",
                                  "LT", "GT", "SLT", "SGT", "EQ", "ISZERO", "AND", "OR", "XOR", "NOT"}:

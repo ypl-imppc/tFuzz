@@ -96,12 +96,6 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
-            else:
-                # Even if we didn't witness a wrap, user-controlled additions are overflow-prone.
-                for index in taint_sources:
-                    if self._taint_is_numeric(index, individual, transaction_index):
-                        self.overflows[index] = previous_instruction["pc"], transaction_index
-                        return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
         elif previous_instruction and previous_instruction["op"] == "MUL":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
@@ -162,11 +156,6 @@ class IntegerOverflowDetector():
                         if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
                             index = ''.join(str(taint) for taint in fallback_record.stack[pos])
                             break
-
-            # If the operands originate from calldata/callvalue, treat it as a potential underflow immediately
-            if index and self._taint_is_numeric(index, individual, transaction_index):
-                self.underflows[index] = previous_instruction["pc"], transaction_index
-                return previous_instruction["pc"], transaction_index, "underflow"
 
             if underflow:
                 if not index:
