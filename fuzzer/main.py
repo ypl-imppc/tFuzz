@@ -368,6 +368,30 @@ class Fuzzer:
                             bytecode=self.deployement_bytecode,
                             accounts=self.instrumented_evm.accounts,
                             contract=contract_address)
+        # Timestamp-heavy datasets: seed timestamp pool so time branches can flip without heavy SMT.
+        try:
+            if self.args.source:
+                norm_src = os.path.normpath(self.args.source).lower()
+                if "timestamp" in norm_src.split(os.sep):
+                    base_ts = getattr(self.instrumented_evm.vm.state, "timestamp", 0)
+                    seed_values = [base_ts, 0, 1]
+                    for delta in (1, 60, 3600, 86400):
+                        seed_values.append(base_ts + delta)
+                        if base_ts > delta:
+                            seed_values.append(base_ts - delta)
+                    for func_sel in self.interface:
+                        if func_sel == "constructor":
+                            continue
+                        for ts in seed_values:
+                            try:
+                                ts_int = int(ts)
+                            except Exception:
+                                continue
+                            if ts_int < 0:
+                                continue
+                            generator.add_timestamp_to_pool(func_sel, ts_int)
+        except Exception:
+            pass
         # Force 0-value transactions for non-payable functions to avoid immediate reverts.
         try:
             for entry in (self.abi or []):
@@ -584,6 +608,18 @@ def main():
     args = launch_argument_parser()
 
     logger = initialize_logger("Main    ")
+
+    # Heuristic: timestamp dataset is solver-heavy (mod constraints). Cap solver work and symbolic retries.
+    try:
+        if args.source:
+            norm_src = os.path.normpath(args.source).lower()
+            if "timestamp" in norm_src.split(os.sep):
+                if settings.SOLVER_TIMEOUT == 0:
+                    settings.SOLVER_TIMEOUT = 50
+                if args.max_symbolic_execution is None and settings.MAX_SYMBOLIC_EXECUTION > 3:
+                    settings.MAX_SYMBOLIC_EXECUTION = 3
+    except Exception:
+        pass
 
     # Check if contract has already been analyzed
     if args.results and os.path.exists(args.results):
