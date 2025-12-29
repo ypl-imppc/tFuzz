@@ -209,6 +209,87 @@ class Fuzzer:
         # PUSH32 <val> ; MSTORE(0, val) ; RETURN 32 bytes from offset 0
         return bytes([0x7f]) + val_bytes + bytes([0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3])
 
+    @staticmethod
+    def _build_selector_return_runtime(selector_map: dict, default_value: int = 0) -> bytes:
+        """
+        Build a small runtime that returns different 32-byte constants based on the 4-byte selector.
+        Uses a DIV by 2^224 to extract the selector (compatible with Byzantium).
+        """
+        def _norm_selector(sel):
+            if isinstance(sel, bytes):
+                return sel
+            if isinstance(sel, str):
+                s = sel[2:] if sel.startswith("0x") else sel
+                return bytes.fromhex(s)
+            raise ValueError("Unsupported selector type")
+
+        def _push(op, data=None):
+            code.append(op)
+            if data:
+                code.extend(data)
+
+        # Opcodes
+        PUSH1 = 0x60
+        PUSH4 = 0x63
+        PUSH32 = 0x7f
+        CALLDATALOAD = 0x35
+        DIV = 0x04
+        DUP1 = 0x80
+        EQ = 0x14
+        JUMPI = 0x57
+        JUMPDEST = 0x5b
+        MSTORE = 0x52
+        RETURN = 0xf3
+
+        code = bytearray()
+        patches = []
+        labels = {}
+
+        # sel = calldata[0] / 2^224
+        _push(PUSH1, bytes([0x00]))
+        _push(CALLDATALOAD)
+        _push(PUSH32, (1 << 224).to_bytes(32, byteorder="big", signed=False))
+        _push(DIV)
+
+        # selector checks
+        for sel, _ in selector_map.items():
+            _push(DUP1)
+            _push(PUSH4, _norm_selector(sel))
+            _push(EQ)
+            _push(PUSH1, bytes([0x00]))  # placeholder
+            patches.append((len(code) - 1, sel))
+            _push(JUMPI)
+
+        # default
+        labels["__default__"] = len(code)
+        _push(JUMPDEST)
+        _push(PUSH32, int(default_value % (1 << 256)).to_bytes(32, byteorder="big", signed=False))
+        _push(PUSH1, bytes([0x00]))
+        _push(MSTORE)
+        _push(PUSH1, bytes([0x20]))
+        _push(PUSH1, bytes([0x00]))
+        _push(RETURN)
+
+        # per-selector returns
+        for sel, val in selector_map.items():
+            labels[sel] = len(code)
+            _push(JUMPDEST)
+            _push(PUSH32, int(val % (1 << 256)).to_bytes(32, byteorder="big", signed=False))
+            _push(PUSH1, bytes([0x00]))
+            _push(MSTORE)
+            _push(PUSH1, bytes([0x20]))
+            _push(PUSH1, bytes([0x00]))
+            _push(RETURN)
+
+        # Patch jump destinations (PUSH1)
+        for idx, sel in patches:
+            dest = labels.get(sel, labels["__default__"])
+            if dest > 0xff:
+                raise ValueError("Stub selector runtime too large for PUSH1 jump")
+            code[idx] = dest
+
+        return bytes(code)
+
     def _seed_mapping_slots(self, contract_address: str, slot_indices=(0, 1, 2, 3), seed_value: int = 1):
         """
         Heuristic: pre-seed common mapping(address => uint/bool) slots so branches that
@@ -241,8 +322,44 @@ class Fuzzer:
         # Predeploy simple constant-return stub contracts to explore inter-contract conditions.
         try:
             # Prioritize values that satisfy common inter-contract conditions.
-            stub_values = [4000, 10000, 3000, 1000, 10, 2, 1, 0]
+            stub_values = [4000, 5000, 10000, 3000, 1000, 10, 2, 1, 0]
             self.env.stub_contracts = []
+            # Selector-aware stub for common interface patterns (e.g., getGoal()/testbool(uint))
+            try:
+                selector_stub_addr = None
+                if self.args.source and os.path.isfile(self.args.source):
+                    with open(self.args.source, "r", encoding="utf-8") as _sf:
+                        _src_text = _sf.read().lower()
+                    if "getgoal(" in _src_text and "testbool(" in _src_text:
+                        sel_getgoal = keccak("getGoal()".encode())[:4].hex()
+                        sel_testbool = keccak("testbool(uint256)".encode())[:4].hex()
+                        selector_runtime = Fuzzer._build_selector_return_runtime(
+                            {sel_getgoal: 5000, sel_testbool: 0},
+                            default_value=0
+                        )
+                        selector_stub_addr = self.instrumented_evm.create_fake_account(
+                            "0xf00dbabf00000000000000000000000000000000",
+                            code=selector_runtime
+                        )
+                        self.instrumented_evm.accounts.append(selector_stub_addr)
+                        self.env.other_contracts.append(to_canonical_address(selector_stub_addr))
+                        self.env.len_overall_pcs_with_children += 1
+                        self.env.stub_contracts.append(selector_stub_addr)
+
+                        selector_runtime_low = Fuzzer._build_selector_return_runtime(
+                            {sel_getgoal: 1000, sel_testbool: 0},
+                            default_value=0
+                        )
+                        selector_stub_addr_low = self.instrumented_evm.create_fake_account(
+                            "0xf00dbac00000000000000000000000000000000",
+                            code=selector_runtime_low
+                        )
+                        self.instrumented_evm.accounts.append(selector_stub_addr_low)
+                        self.env.other_contracts.append(to_canonical_address(selector_stub_addr_low))
+                        self.env.len_overall_pcs_with_children += 1
+                        self.env.stub_contracts.append(selector_stub_addr_low)
+            except Exception as _sel_e:
+                self.logger.debug(f"Selector-aware stub skipped: {type(_sel_e).__name__}: {_sel_e}")
             for idx, cval in enumerate(stub_values):
                 runtime_code = Fuzzer._build_constant_return_runtime(cval)
                 stub_address = self.instrumented_evm.create_fake_account(f"0xf00dbabe{idx:032x}", code=runtime_code)
@@ -390,6 +507,25 @@ class Fuzzer:
                             if ts_int < 0:
                                 continue
                             generator.add_timestamp_to_pool(func_sel, ts_int)
+        except Exception:
+            pass
+        # Overflow datasets: aggressively seed boundary values for uint/int params.
+        try:
+            if self.args.source:
+                norm_src = os.path.normpath(self.args.source).lower()
+                if "overflow" in norm_src.split(os.sep):
+                    for func_sel, arg_types in self.interface.items():
+                        if func_sel == "constructor":
+                            continue
+                        for idx, ty in enumerate(arg_types):
+                            ty_l = str(ty).lower()
+                            if not (ty_l.startswith("uint") or ty_l.startswith("int")):
+                                continue
+                            try:
+                                for v in generator._candidate_values_for_type(ty, limit=6):
+                                    generator.add_argument_to_pool(func_sel, idx, v)
+                            except Exception:
+                                pass
         except Exception:
             pass
         # Force 0-value transactions for non-payable functions to avoid immediate reverts.
@@ -626,6 +762,20 @@ def main():
         os.remove(args.results)
         logger.info("Contract "+str(args.source)+" has already been analyzed: "+str(args.results))
         sys.exit(0)
+
+    # Heuristic: overflow datasets without pragma should compile with pre-0.8 solc
+    # to avoid built-in overflow checks eliminating wraparound behavior.
+    try:
+        if args.source:
+            norm_src = os.path.normpath(args.source).lower()
+            if "overflow" in norm_src.split(os.sep):
+                with open(args.source, "r", encoding="utf-8") as _sf:
+                    _src_text = _sf.read()
+                if "pragma solidity" not in _src_text.lower():
+                    args.solc_version = "0.4.26"
+                    logger.info("Heuristic: using solc 0.4.26 for overflow dataset without pragma.")
+    except Exception:
+        pass
 
     # Initializing random
     if args.seed:

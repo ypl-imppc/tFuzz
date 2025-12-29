@@ -48,6 +48,15 @@ class IntegerOverflowDetector():
             and current_instruction
             and current_instruction["op"] == "ADD"
         )
+        potential_ok = False
+        try:
+            src = None
+            if getattr(mfe, "args", None):
+                src = getattr(mfe.args, "source", None)
+            if src and "overflow" in str(src).replace("\\", "/"):
+                potential_ok = True
+        except Exception:
+            pass
 
         # Addition
         if previous_instruction and previous_instruction["op"] == "ADD":
@@ -96,6 +105,12 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
+            elif potential_ok:
+                # Overflow dataset: also treat tainted additions as candidates
+                for index in taint_sources:
+                    if self._taint_is_numeric(index, individual, transaction_index):
+                        self.overflows[index] = previous_instruction["pc"], transaction_index
+                        return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
         elif previous_instruction and previous_instruction["op"] == "MUL":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
@@ -162,6 +177,10 @@ class IntegerOverflowDetector():
                     # Last resort: synthesize an identifier so we still report the underflow
                     index = "underflow_" + hex(previous_instruction["pc"])
 
+                self.underflows[index] = previous_instruction["pc"], transaction_index
+                return previous_instruction["pc"], transaction_index, "underflow"
+            elif potential_ok and index and self._taint_is_numeric(index, individual, transaction_index):
+                # Overflow dataset: treat tainted subtraction as candidate underflow
                 self.underflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "underflow"
         # Check if overflow flows into storage

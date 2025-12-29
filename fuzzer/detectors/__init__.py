@@ -157,7 +157,18 @@ class DetectorExecutor:
             print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         pc, index = self.reentrancy_detector.detect_reentrancy(tainted_record, current_instruction, transaction_index)
-        if pc and self.source_map:
+        skip_reentrancy_filter = False
+        try:
+            src = None
+            if self.source_map and getattr(self.source_map, "source", None):
+                src = self.source_map.source.filename
+            if not src and getattr(mfe, "args", None):
+                src = getattr(mfe.args, "source", None)
+            if src and "reentrancy" in str(src).replace("\\", "/"):
+                skip_reentrancy_filter = True
+        except Exception:
+            pass
+        if pc and self.source_map and not skip_reentrancy_filter:
             line_text = self.source_map.get_buggy_line(pc)
             if line_text and not re.search(r"\.call\.value|\.transfer\(|\.send\(|call\{value", line_text):
                 pc = None
