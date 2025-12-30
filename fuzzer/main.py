@@ -485,47 +485,42 @@ class Fuzzer:
                             bytecode=self.deployement_bytecode,
                             accounts=self.instrumented_evm.accounts,
                             contract=contract_address)
-        # Timestamp-heavy datasets: seed timestamp pool so time branches can flip without heavy SMT.
+        # Seed timestamp pool so time branches can flip without heavy SMT.
         try:
-            if self.args.source:
-                norm_src = os.path.normpath(self.args.source).lower()
-                if "timestamp" in norm_src.split(os.sep):
-                    base_ts = getattr(self.instrumented_evm.vm.state, "timestamp", 0)
-                    seed_values = [base_ts, 0, 1]
-                    for delta in (1, 60, 3600, 86400):
-                        seed_values.append(base_ts + delta)
-                        if base_ts > delta:
-                            seed_values.append(base_ts - delta)
-                    for func_sel in self.interface:
-                        if func_sel == "constructor":
+            if getattr(self.args, "_has_time_ref", False):
+                base_ts = getattr(self.instrumented_evm.vm.state, "timestamp", 0)
+                seed_values = [base_ts, 0, 1]
+                for delta in (1, 60, 3600, 86400):
+                    seed_values.append(base_ts + delta)
+                    if base_ts > delta:
+                        seed_values.append(base_ts - delta)
+                for func_sel in self.interface:
+                    if func_sel == "constructor":
+                        continue
+                    for ts in seed_values:
+                        try:
+                            ts_int = int(ts)
+                        except Exception:
                             continue
-                        for ts in seed_values:
-                            try:
-                                ts_int = int(ts)
-                            except Exception:
-                                continue
-                            if ts_int < 0:
-                                continue
-                            generator.add_timestamp_to_pool(func_sel, ts_int)
+                        if ts_int < 0:
+                            continue
+                        generator.add_timestamp_to_pool(func_sel, ts_int)
         except Exception:
             pass
-        # Overflow datasets: aggressively seed boundary values for uint/int params.
+        # Seed boundary values for uint/int params to surface arithmetic bugs.
         try:
-            if self.args.source:
-                norm_src = os.path.normpath(self.args.source).lower()
-                if "overflow" in norm_src.split(os.sep):
-                    for func_sel, arg_types in self.interface.items():
-                        if func_sel == "constructor":
-                            continue
-                        for idx, ty in enumerate(arg_types):
-                            ty_l = str(ty).lower()
-                            if not (ty_l.startswith("uint") or ty_l.startswith("int")):
-                                continue
-                            try:
-                                for v in generator._candidate_values_for_type(ty, limit=6):
-                                    generator.add_argument_to_pool(func_sel, idx, v)
-                            except Exception:
-                                pass
+            for func_sel, arg_types in self.interface.items():
+                if func_sel == "constructor":
+                    continue
+                for idx, ty in enumerate(arg_types):
+                    ty_l = str(ty).lower()
+                    if not (ty_l.startswith("uint") or ty_l.startswith("int")):
+                        continue
+                    try:
+                        for v in generator._candidate_values_for_type(ty, limit=6):
+                            generator.add_argument_to_pool(func_sel, idx, v)
+                    except Exception:
+                        pass
         except Exception:
             pass
         # Force 0-value transactions for non-payable functions to avoid immediate reverts.
@@ -745,37 +740,37 @@ def main():
 
     logger = initialize_logger("Main    ")
 
-    # Heuristic: timestamp dataset is solver-heavy (mod constraints). Cap solver work and symbolic retries.
-    try:
-        if args.source:
-            norm_src = os.path.normpath(args.source).lower()
-            if "timestamp" in norm_src.split(os.sep):
-                if settings.SOLVER_TIMEOUT == 0:
-                    settings.SOLVER_TIMEOUT = 50
-                if args.max_symbolic_execution is None and settings.MAX_SYMBOLIC_EXECUTION > 3:
-                    settings.MAX_SYMBOLIC_EXECUTION = 3
-    except Exception:
-        pass
-
     # Check if contract has already been analyzed
     if args.results and os.path.exists(args.results):
         os.remove(args.results)
         logger.info("Contract "+str(args.source)+" has already been analyzed: "+str(args.results))
         sys.exit(0)
 
-    # Heuristic: overflow datasets without pragma should compile with pre-0.8 solc
-    # to avoid built-in overflow checks eliminating wraparound behavior.
+    source_text = ""
     try:
-        if args.source:
-            norm_src = os.path.normpath(args.source).lower()
-            if "overflow" in norm_src.split(os.sep):
-                with open(args.source, "r", encoding="utf-8") as _sf:
-                    _src_text = _sf.read()
-                if "pragma solidity" not in _src_text.lower():
-                    args.solc_version = "0.4.26"
-                    logger.info("Heuristic: using solc 0.4.26 for overflow dataset without pragma.")
+        if args.source and os.path.isfile(args.source):
+            with open(args.source, "r", encoding="utf-8") as _sf:
+                source_text = _sf.read()
     except Exception:
-        pass
+        source_text = ""
+
+    src_lower = source_text.lower()
+    has_time_ref = bool(re.search(r"\bnow\b", src_lower)) or ("block.timestamp" in src_lower)
+    has_pragma = "pragma solidity" in src_lower
+    setattr(args, "_has_time_ref", has_time_ref)
+    setattr(args, "_has_pragma", has_pragma)
+
+    # Heuristic: time-based branches are solver-heavy (mod constraints). Cap solver work and symbolic retries.
+    if has_time_ref:
+        if settings.SOLVER_TIMEOUT == 0:
+            settings.SOLVER_TIMEOUT = 50
+        if args.max_symbolic_execution is None and settings.MAX_SYMBOLIC_EXECUTION > 3:
+            settings.MAX_SYMBOLIC_EXECUTION = 3
+
+    # Heuristic: sources without pragma likely pre-0.8 (no checked arithmetic).
+    if args.source and not has_pragma:
+        args.solc_version = "0.4.26"
+        logger.info("Heuristic: using solc 0.4.26 for source without pragma.")
 
     # Initializing random
     if args.seed:

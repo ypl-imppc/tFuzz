@@ -157,21 +157,6 @@ class DetectorExecutor:
             print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         pc, index = self.reentrancy_detector.detect_reentrancy(tainted_record, current_instruction, transaction_index)
-        skip_reentrancy_filter = False
-        try:
-            src = None
-            if self.source_map and getattr(self.source_map, "source", None):
-                src = self.source_map.source.filename
-            if not src and getattr(mfe, "args", None):
-                src = getattr(mfe.args, "source", None)
-            if src and "reentrancy" in str(src).replace("\\", "/"):
-                skip_reentrancy_filter = True
-        except Exception:
-            pass
-        if pc and self.source_map and not skip_reentrancy_filter:
-            line_text = self.source_map.get_buggy_line(pc)
-            if line_text and not re.search(r"\.call\.value|\.transfer\(|\.send\(|call\{value", line_text):
-                pc = None
         if pc and DetectorExecutor.add_error(errors, pc, "Reentrancy", individual, mfe, self.reentrancy_detector, self.source_map):
             color = DetectorExecutor.get_color_for_severity(self.reentrancy_detector.severity)
             self.logger.title(color+"-----------------------------------------------------")
@@ -234,39 +219,26 @@ class DetectorExecutor:
             self.logger.title(color+"-----------------------------------------------------")
             print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
-        skip_unchecked = False
-        try:
-            src = None
-            if self.source_map and getattr(self.source_map, "source", None):
-                src = self.source_map.source.filename
-            if not src and getattr(mfe, "args", None):
-                src = getattr(mfe.args, "source", None)
-            if src and "reentrancy" in str(src).replace("\\", "/"):
-                skip_unchecked = True
-        except Exception:
-            pass
-
-        if not skip_unchecked:
-            pc, index = self.unchecked_return_value_detector.detect_unchecked_return_value(previous_instruction, current_instruction, tainted_record, transaction_index)
-            if pc and DetectorExecutor.add_error(errors, pc, "Unchecked Return Value", individual, mfe, self.unchecked_return_value_detector, self.source_map):
-                color = DetectorExecutor.get_color_for_severity(self.unchecked_return_value_detector.severity)
+        pc, index = self.unchecked_return_value_detector.detect_unchecked_return_value(previous_instruction, current_instruction, tainted_record, transaction_index)
+        if pc and DetectorExecutor.add_error(errors, pc, "Unchecked Return Value", individual, mfe, self.unchecked_return_value_detector, self.source_map):
+            color = DetectorExecutor.get_color_for_severity(self.unchecked_return_value_detector.severity)
+            self.logger.title(color+"-----------------------------------------------------")
+            self.logger.title(color+"        !!! Unchecked return value detected !!!         ")
+            self.logger.title(color+"-----------------------------------------------------")
+            self.logger.title(color+"SWC-ID:   "+str(self.unchecked_return_value_detector.swc_id))
+            self.logger.title(color+"Severity: "+self.unchecked_return_value_detector.severity)
+            self.logger.title(color+"-----------------------------------------------------")
+            if self.source_map and self.source_map.get_buggy_line(pc):
+                self.logger.title(color+"Source code line:")
                 self.logger.title(color+"-----------------------------------------------------")
-                self.logger.title(color+"        !!! Unchecked return value detected !!!         ")
+                line = self.source_map.get_location(pc)['begin']['line'] + 1
+                column = self.source_map.get_location(pc)['begin']['column'] + 1
+                self.logger.title(color+self.source_map.source.filename+":"+str(line)+":"+str(column))
+                self.logger.title(color+self.source_map.get_buggy_line(pc))
                 self.logger.title(color+"-----------------------------------------------------")
-                self.logger.title(color+"SWC-ID:   "+str(self.unchecked_return_value_detector.swc_id))
-                self.logger.title(color+"Severity: "+self.unchecked_return_value_detector.severity)
-                self.logger.title(color+"-----------------------------------------------------")
-                if self.source_map and self.source_map.get_buggy_line(pc):
-                    self.logger.title(color+"Source code line:")
-                    self.logger.title(color+"-----------------------------------------------------")
-                    line = self.source_map.get_location(pc)['begin']['line'] + 1
-                    column = self.source_map.get_location(pc)['begin']['column'] + 1
-                    self.logger.title(color+self.source_map.source.filename+":"+str(line)+":"+str(column))
-                    self.logger.title(color+self.source_map.get_buggy_line(pc))
-                    self.logger.title(color+"-----------------------------------------------------")
-                self.logger.title(color+"Transaction sequence:")
-                self.logger.title(color+"-----------------------------------------------------")
-                print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
+            self.logger.title(color+"Transaction sequence:")
+            self.logger.title(color+"-----------------------------------------------------")
+            print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         # pc, index = self.unsafe_delegatecall_detector.detect_unsafe_delegatecall(current_instruction, tainted_record, individual, previous_instruction, transaction_index)
         # if pc and DetectorExecutor.add_error(errors, pc, "Unsafe Delegatecall", individual, mfe, self.unsafe_delegatecall_detector, self.source_map):
