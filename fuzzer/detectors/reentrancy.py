@@ -31,11 +31,8 @@ class ReentrancyDetector():
                 stack = current_instruction.get("stack", [])
                 if len(stack) < 7:
                     return None, None
-                # CALL arguments (top of stack is outSize): [gas, to, value, inOffset, inSize, outOffset, outSize]
-                value = convert_stack_value_to_int(stack[-5])
-                if value <= 0:
-                    return None, None
             self.calls.add((current_instruction["pc"], transaction_index))
+            return current_instruction["pc"], transaction_index
         # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
         elif current_instruction["op"] == "SSTORE" and self.calls:
             if depth != 1:

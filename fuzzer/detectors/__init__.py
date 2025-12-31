@@ -78,6 +78,19 @@ class DetectorExecutor:
             return True
         return False
 
+    @staticmethod
+    def is_low_level_call_line(source_line):
+        if not source_line:
+            return False
+        patterns = [
+            r"\.\s*call\b\s*(\(|\{)",
+            r"\.\s*call\b\s*\.\s*(value|gas)\s*\(",
+            r"\.\s*delegatecall\b\s*(\(|\{)",
+            r"\.\s*transfer\b\s*\(",
+            r"\.\s*send\b\s*\(",
+        ]
+        return any(re.search(pattern, source_line) for pattern in patterns)
+
     def get_color_for_severity(severity):
         if severity == "High":
             return "\u001b[31m" # Red
@@ -157,6 +170,10 @@ class DetectorExecutor:
             print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         pc, index = self.reentrancy_detector.detect_reentrancy(tainted_record, current_instruction, transaction_index)
+        if pc and self.source_map and self.source_map.get_buggy_line(pc):
+            source_line = self.source_map.get_buggy_line(pc)
+            if not DetectorExecutor.is_low_level_call_line(source_line):
+                pc = None
         if pc and DetectorExecutor.add_error(errors, pc, "Reentrancy", individual, mfe, self.reentrancy_detector, self.source_map):
             color = DetectorExecutor.get_color_for_severity(self.reentrancy_detector.severity)
             self.logger.title(color+"-----------------------------------------------------")
