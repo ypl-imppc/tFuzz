@@ -15,26 +15,6 @@ class IntegerOverflowDetector():
         self.overflows = {}
         self.underflows = {}
 
-    def _allow_potential_overflow(self, mfe) -> bool:
-        v = None
-        try:
-            if getattr(mfe, "args", None):
-                v = getattr(mfe.args, "solc_version", None)
-            if hasattr(v, "major"):
-                major = int(v.major)
-                minor = int(v.minor)
-            else:
-                s = str(v or "").strip()
-                if s.startswith("v"):
-                    s = s[1:]
-                parts = s.split(".")
-                major = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 0
-                minor = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-            return (major, minor) < (0, 8)
-        except Exception:
-            # Conservative: assume potential overflow is possible
-            return True
-
     def _taint_is_numeric(self, taint_index, individual, transaction_index):
         if not taint_index:
             return False
@@ -68,8 +48,6 @@ class IntegerOverflowDetector():
             and current_instruction
             and current_instruction["op"] == "ADD"
         )
-        potential_ok = self._allow_potential_overflow(mfe)
-
         # Addition
         if previous_instruction and previous_instruction["op"] == "ADD":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
@@ -117,12 +95,6 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
-            elif potential_ok:
-                # Overflow dataset: also treat tainted additions as candidates
-                for index in taint_sources:
-                    if self._taint_is_numeric(index, individual, transaction_index):
-                        self.overflows[index] = previous_instruction["pc"], transaction_index
-                        return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
         elif previous_instruction and previous_instruction["op"] == "MUL":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
@@ -189,10 +161,6 @@ class IntegerOverflowDetector():
                     # Last resort: synthesize an identifier so we still report the underflow
                     index = "underflow_" + hex(previous_instruction["pc"])
 
-                self.underflows[index] = previous_instruction["pc"], transaction_index
-                return previous_instruction["pc"], transaction_index, "underflow"
-            elif potential_ok and index and self._taint_is_numeric(index, individual, transaction_index):
-                # Overflow dataset: treat tainted subtraction as candidate underflow
                 self.underflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "underflow"
         # Check if overflow flows into storage

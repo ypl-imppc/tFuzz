@@ -23,19 +23,20 @@ class ReentrancyDetector():
             if current_instruction.get("stack"):
                 storage_index = convert_stack_value_to_int(current_instruction["stack"][-1])
                 self.sloads[storage_index] = current_instruction["pc"], transaction_index
-        # Track CALLs with value or tainted destination/value, even if no prior SLOAD was seen.
-        elif current_instruction["op"] == "CALL":
+        # Track external calls that can lead to reentrancy.
+        elif current_instruction["op"] in ["CALL", "DELEGATECALL"]:
             if depth != 1:
                 return None, None
-            stack = current_instruction.get("stack", [])
-            if len(stack) < 7:
-                return None, None
-            # CALL arguments (top of stack is outSize): [gas, to, value, inOffset, inSize, outOffset, outSize]
-            value = convert_stack_value_to_int(stack[-5])
-            # Heuristic: value-bearing external calls are reentrancy-prone
-            if value > 0:
-                self.calls.add((current_instruction["pc"], transaction_index))
-                return current_instruction["pc"], transaction_index
+            if current_instruction["op"] == "CALL":
+                stack = current_instruction.get("stack", [])
+                if len(stack) < 7:
+                    return None, None
+                # CALL arguments (top of stack is outSize): [gas, to, value, inOffset, inSize, outOffset, outSize]
+                value = convert_stack_value_to_int(stack[-5])
+                if value <= 0:
+                    return None, None
+            self.calls.add((current_instruction["pc"], transaction_index))
+            return current_instruction["pc"], transaction_index
         # Check if this sstore is happening after a call and if it is happening after an sload which shares the same storage index
         elif current_instruction["op"] == "SSTORE" and self.calls:
             if depth != 1:
