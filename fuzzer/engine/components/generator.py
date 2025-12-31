@@ -430,7 +430,11 @@ class Generator:
             vals = [max_v, min_v, -1, 0, 1]
             return vals[:limit]
         if ty_l.startswith('address'):
-            samp = self.accounts[:]
+            if getattr(self, "preferred_addresses", None):
+                preferred = list(self.preferred_addresses)
+                samp = preferred + [a for a in self.accounts if a not in preferred]
+            else:
+                samp = self.accounts[:]
             return samp[:min(len(samp), max(1, limit))]
         if ty_l.startswith('string'):
             out = []
