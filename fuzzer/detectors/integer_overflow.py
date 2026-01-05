@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import re
-from z3 import BitVec
-from utils.utils import convert_stack_value_to_int, convert_stack_value_to_hex
+from utils.utils import convert_stack_value_to_int
 
 class IntegerOverflowDetector():
     def __init__(self):
@@ -13,7 +12,12 @@ class IntegerOverflowDetector():
         self.swc_id = 101
         self.severity = "High"
         self.overflows = {}
-        self.underflows = {}
+
+    @staticmethod
+    def _to_signed(value):
+        if value >= (1 << 255):
+            return value - (1 << 256)
+        return value
 
     def _taint_is_numeric(self, taint_index, individual, transaction_index):
         if not taint_index:
@@ -52,22 +56,22 @@ class IntegerOverflowDetector():
         if previous_instruction and previous_instruction["op"] == "ADD":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
             b = convert_stack_value_to_int(previous_instruction["stack"][-1])
-            has_overflow = (a + b != convert_stack_value_to_int(current_instruction["stack"][-1])) and not compiler_value_negation
-            taint_sources = []
-            if tainted_record and tainted_record.stack:
-                for pos in (-1, -2):
-                    if len(tainted_record.stack) >= abs(pos) and tainted_record.stack[pos]:
-                        taint_sources.append(''.join(str(taint) for taint in tainted_record.stack[pos]))
-            if not taint_sources:
-                fallback_record = mfe.symbolic_taint_analyzer.get_tainted_record(index=-1)
-                if fallback_record and fallback_record.stack:
+            if compiler_value_negation:
+                return None, None, None
+            if a + b != convert_stack_value_to_int(current_instruction["stack"][-1]):
+                taint_sources = []
+                if tainted_record and tainted_record.stack:
                     for pos in (-1, -2):
-                        if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
-                            taint_sources.append(''.join(str(taint) for taint in fallback_record.stack[pos]))
-            if not taint_sources:
-                taint_sources.append(f"overflow_{hex(previous_instruction['pc'])}")
-
-            if has_overflow:
+                        if len(tainted_record.stack) >= abs(pos) and tainted_record.stack[pos]:
+                            taint_sources.append(''.join(str(taint) for taint in tainted_record.stack[pos]))
+                if not taint_sources:
+                    fallback_record = mfe.symbolic_taint_analyzer.get_tainted_record(index=-1)
+                    if fallback_record and fallback_record.stack:
+                        for pos in (-1, -2):
+                            if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
+                                taint_sources.append(''.join(str(taint) for taint in fallback_record.stack[pos]))
+                if not taint_sources:
+                    taint_sources.append(f"overflow_{hex(previous_instruction['pc'])}")
                 try:
                     from utils.utils import initialize_logger
                     logger = initialize_logger("IntOverflow")
@@ -95,32 +99,24 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
-            else:
-                if compiler_value_negation:
-                    return None, None, None
-                # No concrete overflow, but arithmetic on tainted numeric data can still be unsafe.
-                for index in taint_sources:
-                    if self._taint_is_numeric(index, individual, transaction_index):
-                        self.overflows[index] = previous_instruction["pc"], transaction_index
-                        return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
         elif previous_instruction and previous_instruction["op"] == "MUL":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
             b = convert_stack_value_to_int(previous_instruction["stack"][-1])
-            taint_sources = []
-            if tainted_record and tainted_record.stack:
-                for pos in (-1, -2):
-                    if len(tainted_record.stack) >= abs(pos) and tainted_record.stack[pos]:
-                        taint_sources.append(''.join(str(taint) for taint in tainted_record.stack[pos]))
-            if not taint_sources:
-                fallback_record = mfe.symbolic_taint_analyzer.get_tainted_record(index=-1)
-                if fallback_record and fallback_record.stack:
-                    for pos in (-1, -2):
-                        if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
-                            taint_sources.append(''.join(str(taint) for taint in fallback_record.stack[pos]))
-            if not taint_sources:
-                taint_sources.append(f"overflow_{hex(previous_instruction['pc'])}")
             if a * b != convert_stack_value_to_int(current_instruction["stack"][-1]):
+                taint_sources = []
+                if tainted_record and tainted_record.stack:
+                    for pos in (-1, -2):
+                        if len(tainted_record.stack) >= abs(pos) and tainted_record.stack[pos]:
+                            taint_sources.append(''.join(str(taint) for taint in tainted_record.stack[pos]))
+                if not taint_sources:
+                    fallback_record = mfe.symbolic_taint_analyzer.get_tainted_record(index=-1)
+                    if fallback_record and fallback_record.stack:
+                        for pos in (-1, -2):
+                            if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
+                                taint_sources.append(''.join(str(taint) for taint in fallback_record.stack[pos]))
+                if not taint_sources:
+                    taint_sources.append(f"overflow_{hex(previous_instruction['pc'])}")
                 try:
                     from utils.utils import initialize_logger
                     logger = initialize_logger("IntOverflow")
@@ -138,18 +134,11 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
-            else:
-                for index in taint_sources:
-                    if self._taint_is_numeric(index, individual, transaction_index):
-                        self.overflows[index] = previous_instruction["pc"], transaction_index
-                        return previous_instruction["pc"], transaction_index, "overflow"
         # Subtraction
         elif previous_instruction and previous_instruction["op"] == "SUB":
             a = convert_stack_value_to_int(previous_instruction["stack"][-1])
             b = convert_stack_value_to_int(previous_instruction["stack"][-2])
-            result_val = convert_stack_value_to_int(current_instruction["stack"][-1])
-            # Underflow wraps to a huge 256-bit value (typically > 2^255).
-            underflow = result_val > (1 << 255)
+            underflow = a < b
 
             index = None
             if tainted_record and tainted_record.stack:
@@ -170,30 +159,49 @@ class IntegerOverflowDetector():
 
             if underflow:
                 if not index:
-                    # Last resort: synthesize an identifier so we still report the underflow
-                    index = "underflow_" + hex(previous_instruction["pc"])
+                    # Last resort: synthesize an identifier so we still report the overflow
+                    index = "overflow_" + hex(previous_instruction["pc"])
 
-                self.underflows[index] = previous_instruction["pc"], transaction_index
-                return previous_instruction["pc"], transaction_index, "underflow"
-            elif index and self._taint_is_numeric(index, individual, transaction_index):
-                self.underflows[index] = previous_instruction["pc"], transaction_index
-                return previous_instruction["pc"], transaction_index, "underflow"
+                self.overflows[index] = previous_instruction["pc"], transaction_index
+                return previous_instruction["pc"], transaction_index, "overflow"
+        # Division (signed overflow only: MIN_INT / -1)
+        elif previous_instruction and previous_instruction["op"] in ["DIV", "SDIV"]:
+            if previous_instruction["op"] == "SDIV":
+                a = convert_stack_value_to_int(previous_instruction["stack"][-1])
+                b = convert_stack_value_to_int(previous_instruction["stack"][-2])
+                if b != 0:
+                    a_signed = self._to_signed(a)
+                    b_signed = self._to_signed(b)
+                    if a_signed == -(1 << 255) and b_signed == -1:
+                        index = None
+                        if tainted_record and tainted_record.stack:
+                            for pos in (-1, -2):
+                                if len(tainted_record.stack) >= abs(pos) and tainted_record.stack[pos]:
+                                    index = ''.join(str(taint) for taint in tainted_record.stack[pos])
+                                    break
+                        if not index:
+                            fallback_record = mfe.symbolic_taint_analyzer.get_tainted_record(index=-1)
+                            if fallback_record and fallback_record.stack:
+                                for pos in (-1, -2):
+                                    if len(fallback_record.stack) >= abs(pos) and fallback_record.stack[pos]:
+                                        index = ''.join(str(taint) for taint in fallback_record.stack[pos])
+                                        break
+                        if not index:
+                            index = "overflow_" + hex(previous_instruction["pc"])
+                        self.overflows[index] = previous_instruction["pc"], transaction_index
+                        return previous_instruction["pc"], transaction_index, "overflow"
         # Check if overflow flows into storage
         if current_instruction and current_instruction["op"] == "SSTORE":
             if tainted_record and tainted_record.stack and tainted_record.stack[-2]: # Storage value
                 index = ''.join(str(taint) for taint in tainted_record.stack[-2])
                 if index in self.overflows:
                     return self.overflows[index][0], self.overflows[index][1], "overflow"
-                if index in self.underflows:
-                    return self.underflows[index][0], self.underflows[index][1], "underflow"
         # Check if overflow flows into call
         elif current_instruction and current_instruction["op"] == "CALL":
             if tainted_record and tainted_record.stack and tainted_record.stack[-3]: # Call value
                 index = ''.join(str(taint) for taint in tainted_record.stack[-3])
                 if index in self.overflows:
                     return self.overflows[index][0], self.overflows[index][1], "overflow"
-                if index in self.underflows:
-                    return self.underflows[index][0], self.underflows[index][1], "underflow"
         # Check if overflow flows into condition
         elif current_instruction and current_instruction["op"] in ["LT", "GT", "SLT", "SGT", "EQ"]:
             if tainted_record and tainted_record.stack:
@@ -201,12 +209,8 @@ class IntegerOverflowDetector():
                     index = ''.join(str(taint) for taint in tainted_record.stack[-1])
                     if index in self.overflows:
                         return self.overflows[index][0], self.overflows[index][1], "overflow"
-                    if index in self.underflows:
-                        return self.underflows[index][0], self.underflows[index][1], "underflow"
                 if tainted_record.stack[-2]: # Second operand
                     index = ''.join(str(taint) for taint in tainted_record.stack[-2])
                     if index in self.overflows:
                         return self.overflows[index][0], self.overflows[index][1], "overflow"
-                    if index in self.underflows:
-                        return self.underflows[index][0], self.underflows[index][1], "underflow"
         return None, None, None

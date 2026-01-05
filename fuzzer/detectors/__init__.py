@@ -141,17 +141,12 @@ class DetectorExecutor:
         #     self.logger.title(color+"-----------------------------------------------------")
         #     print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
-        pc, index, type = self.integer_overflow_detector.detect_integer_overflow(mfe, tainted_record, previous_instruction, current_instruction, individual, transaction_index)
+        pc, index, _ = self.integer_overflow_detector.detect_integer_overflow(mfe, tainted_record, previous_instruction, current_instruction, individual, transaction_index)
         if pc and DetectorExecutor.add_error(errors, pc, "Integer Overflow", individual, mfe, self.integer_overflow_detector, self.source_map):
             color = DetectorExecutor.get_color_for_severity(self.integer_overflow_detector.severity)
-            if type == "overflow":
-                self.logger.title(color+"-----------------------------------------------------")
-                self.logger.title(color+"          !!! Integer overflow detected !!!          ")
-                self.logger.title(color+"-----------------------------------------------------")
-            else:
-                self.logger.title(color+"-----------------------------------------------------")
-                self.logger.title(color+"          !!! Integer underflow detected !!!          ")
-                self.logger.title(color+"-----------------------------------------------------")
+            self.logger.title(color+"-----------------------------------------------------")
+            self.logger.title(color+"          !!! Integer overflow detected !!!          ")
+            self.logger.title(color+"-----------------------------------------------------")
             self.logger.title(color+"SWC-ID:   "+str(self.integer_overflow_detector.swc_id))
             self.logger.title(color+"Severity: "+self.integer_overflow_detector.severity)
             self.logger.title(color+"-----------------------------------------------------")
