@@ -89,6 +89,14 @@ class DetectorExecutor:
         ]
         return any(re.search(pattern, source_line) for pattern in patterns)
 
+    @staticmethod
+    def is_arithmetic_line(source_line):
+        if not source_line:
+            return False
+        code = re.sub(r"/\*.*?\*/", "", source_line)
+        code = code.split("//", 1)[0]
+        return re.search(r"(\+\+|--|\+|\-|\*|/)", code) is not None
+
     def get_color_for_severity(severity):
         if severity == "High":
             return "\u001b[31m" # Red
@@ -142,6 +150,10 @@ class DetectorExecutor:
         #     print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
 
         pc, index, _ = self.integer_overflow_detector.detect_integer_overflow(mfe, tainted_record, previous_instruction, current_instruction, individual, transaction_index)
+        if pc and self.source_map and self.source_map.get_buggy_line(pc):
+            source_line = self.source_map.get_buggy_line(pc)
+            if not DetectorExecutor.is_arithmetic_line(source_line):
+                pc = None
         if pc and DetectorExecutor.add_error(errors, pc, "Integer Overflow", individual, mfe, self.integer_overflow_detector, self.source_map):
             color = DetectorExecutor.get_color_for_severity(self.integer_overflow_detector.severity)
             self.logger.title(color+"-----------------------------------------------------")

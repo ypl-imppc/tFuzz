@@ -99,6 +99,12 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
+            else:
+                if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
+                    index = ''.join(str(taint) for taint in tainted_record.stack[-1])
+                    if self._taint_is_numeric(index, individual, transaction_index):
+                        self.overflows[index] = previous_instruction["pc"], transaction_index
+                        return previous_instruction["pc"], transaction_index, "overflow"
         # Multiplication
         elif previous_instruction and previous_instruction["op"] == "MUL":
             a = convert_stack_value_to_int(previous_instruction["stack"][-2])
@@ -134,6 +140,12 @@ class IntegerOverflowDetector():
                 index = taint_sources[0]
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
+            else:
+                if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
+                    index = ''.join(str(taint) for taint in tainted_record.stack[-1])
+                    if self._taint_is_numeric(index, individual, transaction_index):
+                        self.overflows[index] = previous_instruction["pc"], transaction_index
+                        return previous_instruction["pc"], transaction_index, "overflow"
         # Subtraction
         elif previous_instruction and previous_instruction["op"] == "SUB":
             a = convert_stack_value_to_int(previous_instruction["stack"][-1])
@@ -164,6 +176,12 @@ class IntegerOverflowDetector():
 
                 self.overflows[index] = previous_instruction["pc"], transaction_index
                 return previous_instruction["pc"], transaction_index, "overflow"
+            else:
+                if tainted_record and tainted_record.stack and tainted_record.stack[-1]:
+                    index = ''.join(str(taint) for taint in tainted_record.stack[-1])
+                    if self._taint_is_numeric(index, individual, transaction_index):
+                        self.overflows[index] = previous_instruction["pc"], transaction_index
+                        return previous_instruction["pc"], transaction_index, "overflow"
         # Division (signed overflow only: MIN_INT / -1)
         elif previous_instruction and previous_instruction["op"] in ["DIV", "SDIV"]:
             if previous_instruction["op"] == "SDIV":
