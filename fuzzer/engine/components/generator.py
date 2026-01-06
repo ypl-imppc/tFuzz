@@ -175,6 +175,45 @@ class Generator:
         # Parameter selection strategy hint: 'mixed'|'basic'|'boundary'
         self.param_strategy = 'mixed'
 
+    def _parse_int_bits(self, type_str: str, default_bits: int = 256) -> int:
+        base = (type_str or "").split("[")[0]
+        if base.startswith("uint"):
+            tail = base.replace("uint", "")
+        elif base.startswith("int"):
+            tail = base.replace("int", "")
+        else:
+            return default_bits
+        if not tail:
+            return default_bits
+        try:
+            return int(tail)
+        except ValueError:
+            return default_bits
+
+    def _normalize_integer_value(self, type_str: str, value):
+        if isinstance(value, list):
+            return [self._normalize_integer_value(type_str, v) for v in value]
+        if not isinstance(value, int):
+            return value
+        bits = self._parse_int_bits(type_str)
+        bytes_len = max(1, min(32, int(bits / 8)))
+        if (type_str or "").startswith("uint"):
+            max_v = UINT_MAX[bytes_len]
+            if value < 0:
+                return 0
+            if value > max_v:
+                return max_v
+            return value
+        if (type_str or "").startswith("int"):
+            min_v = INT_MIN[bytes_len]
+            max_v = INT_MAX[bytes_len]
+            if value < min_v:
+                return min_v
+            if value > max_v:
+                return max_v
+            return value
+        return value
+
     # ---- usage recording helpers ----
     def _record_arg_usage(self, function: str, index: int, value, type_str: str = None):
         try:
@@ -468,6 +507,8 @@ class Generator:
             if not lst:
                 # final fallback to a single random value
                 lst = [self.get_argument_value_with_recording(ty, function_selector, idx)]
+            if ty.startswith("uint") or ty.startswith("int"):
+                lst = [self._normalize_integer_value(ty, v) for v in lst]
             value_lists.append(lst)
 
         # Cartesian product with cap
@@ -858,7 +899,8 @@ class Generator:
 
         # Unsigned integer
         elif type.startswith("uint"):
-            bytes = int(int(type.replace("uint", "").split("[")[0]) / 8)
+            bits = self._parse_int_bits(type)
+            bytes = max(1, min(32, int(bits / 8)))
             # Array
             if "[" in type and "]" in type:
                 sizes = self._get_array_sizes(argument_index, function, type)
@@ -874,18 +916,20 @@ class Generator:
                     for _ in range(sizes[1]):
                         new_array.append(array)
                     array = new_array
-                return array
+                return self._normalize_integer_value(type, array)
             # Single value
             else:
-                return self._sample_from_pool_or_random(
+                value = self._sample_from_pool_or_random(
                     function,
                     argument_index,
                     lambda: self.get_random_unsigned_integer(0, UINT_MAX[bytes])
                 )
+                return self._normalize_integer_value(type, value)
 
         # Signed integer
         elif type.startswith("int"):
-            bytes = int(int(type.replace("int", "").split("[")[0]) / 8)
+            bits = self._parse_int_bits(type)
+            bytes = max(1, min(32, int(bits / 8)))
             # Array
             if "[" in type and "]" in type:
                 sizes = self._get_array_sizes(argument_index, function, type)
@@ -901,14 +945,15 @@ class Generator:
                     for _ in range(sizes[1]):
                         new_array.append(array)
                     array = new_array
-                return array
+                return self._normalize_integer_value(type, array)
             # Single value
             else:
-                return self._sample_from_pool_or_random(
+                value = self._sample_from_pool_or_random(
                     function,
                     argument_index,
                     lambda: self.get_random_signed_integer(INT_MIN[bytes], INT_MAX[bytes])
                 )
+                return self._normalize_integer_value(type, value)
 
         # Address
         elif type.startswith("address"):

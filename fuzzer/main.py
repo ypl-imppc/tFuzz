@@ -12,6 +12,7 @@ import argparse
 import re
 
 from eth_utils import encode_hex, decode_hex, to_canonical_address, keccak
+from eth_abi import encode_abi
 from z3 import Solver
 
 from evm import InstrumentedEVM
@@ -104,9 +105,14 @@ def _auto_select_top_caller_from_source(source_text: str) -> str:
         return the one with the largest out-degree; if none match, return the last contract
         (fallback keeps behavior deterministic across runs).
     """
-    # Capture `contract Name { ... }` blocks including nested braces conservatively.
+    # Capture `contract Name [is Base,...] { ... }` blocks including nested braces conservatively.
     # This simple parser assumes no `contract` keyword inside comments/strings.
-    contract_pattern = re.compile(r"contract\s+(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*\{(?P<body>[\s\S]*?)\}\s*", re.MULTILINE)
+    contract_pattern = re.compile(
+        r"(?:abstract\s+)?contract\s+"
+        r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s+is\s+[^{]+)?\s*\{(?P<body>[\s\S]*?)\}\s*",
+        re.MULTILINE,
+    )
     contracts = [(m.group("name"), m.group("body")) for m in contract_pattern.finditer(source_text)]
     if not contracts:
         return ""
@@ -315,9 +321,76 @@ class Fuzzer:
                 slot_int = int.from_bytes(slot_hash, byteorder="big", signed=False)
                 self.instrumented_evm.storage_emulator.set_storage(contract_addr, slot_int, seed_value)
 
+    def _get_block_gas_limit(self):
+        try:
+            vm = getattr(self.instrumented_evm, "vm", None)
+            if vm and getattr(vm, "block", None) and getattr(vm.block, "header", None):
+                gas = getattr(vm.block.header, "gas_limit", None)
+                if gas is not None:
+                    return int(gas)
+        except Exception:
+            pass
+        try:
+            vm = getattr(self.instrumented_evm, "vm", None)
+            state = getattr(vm, "state", None)
+            gas = getattr(state, "block_gas_limit", None)
+            if gas is not None:
+                return int(gas)
+        except Exception:
+            pass
+        return None
+
+    def _seed_values_for_abi_type(self, type_str: str):
+        base = (type_str or "").split("[")[0]
+        if base.startswith("uint"):
+            return [0, 1, 2, 10]
+        if base.startswith("int"):
+            return [0, 1, -1]
+        if base.startswith("bool"):
+            return [False, True]
+        if base.startswith("address"):
+            addrs = [a for a in (self.instrumented_evm.accounts or []) if isinstance(a, str)]
+            return (addrs[:2] or []) + ["0x0000000000000000000000000000000000000000"]
+        if base.startswith("string"):
+            return ["", "a"]
+        if base.startswith("bytes"):
+            if base == "bytes":
+                return [b"", b"\x00"]
+            try:
+                size = int(base.replace("bytes", ""))
+                size = max(0, min(32, size))
+            except ValueError:
+                size = 1
+            return [b"\x00" * size]
+        return [0]
+
+    def _iter_constructor_args(self, constructor_types, max_cases: int = 4):
+        arg_lists = []
+        for ty in constructor_types:
+            if "[" in ty and "]" in ty:
+                base = ty.split("[")[0]
+                sizes = re.findall(r"\[(.*?)\]", ty)
+                fixed = None
+                if sizes and sizes[0].isdigit():
+                    fixed = int(sizes[0])
+                seeds = self._seed_values_for_abi_type(base) or [0]
+                if fixed is not None:
+                    arr = [seeds[0] for _ in range(fixed)]
+                    arg_lists.append([arr])
+                else:
+                    arg_lists.append([[], [seeds[0]]])
+            else:
+                arg_lists.append(self._seed_values_for_abi_type(ty) or [0])
+        for i in range(max_cases):
+            args = []
+            for lst in arg_lists:
+                args.append(lst[i % len(lst)])
+            yield args
+
     def run(self):
         contract_address = None
         self.instrumented_evm.create_fake_accounts()
+        constructor_arg_types = list(self.interface.get("constructor", []))
 
         # Predeploy simple constant-return stub contracts to explore inter-contract conditions.
         try:
@@ -450,9 +523,31 @@ class Fuzzer:
 
             if not contract_address:
                 if "constructor" not in self.interface:
-                    result = self.instrumented_evm.deploy_contract(self.instrumented_evm.accounts[0], self.deployement_bytecode)
-                    if result.is_error:
-                        logger.error("Problem while deploying contract %s using account %s. Error message: %s", self.contract_name, self.instrumented_evm.accounts[0], result._error)
+                    def _try_deploy(bin_code):
+                        res = self.instrumented_evm.deploy_contract(self.instrumented_evm.accounts[0], bin_code)
+                        if res.is_error:
+                            retry_gas = self._get_block_gas_limit()
+                            if retry_gas and retry_gas > settings.GAS_LIMIT:
+                                logger.warning("Deploy failed; retrying with higher gas limit: %s", retry_gas)
+                                res = self.instrumented_evm.deploy_contract(self.instrumented_evm.accounts[0], bin_code, gas=int(retry_gas))
+                        return res
+
+                    result = None
+                    if constructor_arg_types:
+                        for args in self._iter_constructor_args(constructor_arg_types, max_cases=5):
+                            try:
+                                arg_data = encode_abi(constructor_arg_types, args).hex()
+                            except Exception as _enc_e:
+                                self.logger.debug("Constructor arg encode failed: %s -> %s", args, _enc_e)
+                                continue
+                            result = _try_deploy(self.deployement_bytecode + arg_data)
+                            if not result.is_error:
+                                break
+                    else:
+                        result = _try_deploy(self.deployement_bytecode)
+
+                    if result is None or result.is_error:
+                        logger.error("Problem while deploying contract %s using account %s. Error message: %s", self.contract_name, self.instrumented_evm.accounts[0], getattr(result, "_error", b""))
                         sys.exit(-2)
                     else:
                         contract_address = encode_hex(result.msg.storage_address)
@@ -828,12 +923,23 @@ def main():
                     with open(args.source, "r", encoding="utf-8") as _sf:
                         _src_text = _sf.read()
                     auto_choice = _auto_select_top_caller_from_source(_src_text)
-                    if auto_choice and auto_choice in compiler_output['contracts'][args.source]:
+                    contracts = compiler_output["contracts"][args.source]
+                    def _is_fuzzable(_c):
+                        return (
+                            bool(_c.get("abi"))
+                            and bool(_c.get("evm", {}).get("bytecode", {}).get("object"))
+                            and bool(_c.get("evm", {}).get("deployedBytecode", {}).get("object"))
+                        )
+                    fuzzable_names = [n for n, c in contracts.items() if _is_fuzzable(c)]
+                    if auto_choice and auto_choice in contracts and _is_fuzzable(contracts[auto_choice]):
                         logger.info(f"Auto-selected contract: {auto_choice} (calls other contracts and is not called by others)")
                         args.contract = auto_choice
+                    elif fuzzable_names:
+                        args.contract = fuzzable_names[-1]
+                        logger.info(f"Auto-selection fallback to last concrete contract: {args.contract}")
                     else:
                         # Fallback to last contract in compiler output for deterministic behavior
-                        all_names = list(compiler_output['contracts'][args.source].keys())
+                        all_names = list(contracts.keys())
                         if all_names:
                             args.contract = all_names[-1]
                             logger.info(f"Auto-selection fallback to last contract: {args.contract}")
