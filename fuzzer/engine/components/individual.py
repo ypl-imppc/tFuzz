@@ -3,6 +3,7 @@
 
 import sys
 import random
+import re
 
 from copy import deepcopy, copy
 from eth_abi import encode_abi
@@ -70,6 +71,68 @@ class Individual():
             solution.append(input)
         return solution
 
+    def _get_fixed_bytes_length(self, type_str):
+        base = (type_str or "").split("[", 1)[0]
+        if base.startswith("bytes") and base != "bytes":
+            try:
+                return int(base.replace("bytes", ""))
+            except ValueError:
+                return None
+        return None
+
+    def _normalize_bytes_value(self, type_str, value):
+        if isinstance(value, list):
+            return [self._normalize_bytes_value(type_str, v) for v in value]
+        if isinstance(value, bytearray):
+            value = bytes(value)
+        if isinstance(value, bytes):
+            fixed_len = self._get_fixed_bytes_length(type_str)
+            if fixed_len is None:
+                return value
+            if len(value) >= fixed_len:
+                return value[:fixed_len]
+            return value + (b"\x00" * (fixed_len - len(value)))
+        if isinstance(value, int):
+            if value < 0:
+                value = 0
+            fixed_len = self._get_fixed_bytes_length(type_str)
+            if fixed_len is None:
+                length = max(1, (value.bit_length() + 7) // 8)
+                return value.to_bytes(length, byteorder="big")
+            max_val = 1 << (fixed_len * 8)
+            value = value % max_val
+            return value.to_bytes(fixed_len, byteorder="big")
+        if isinstance(value, str):
+            if value.startswith("0x"):
+                hex_str = value[2:]
+                if len(hex_str) % 2 == 1:
+                    hex_str = "0" + hex_str
+                try:
+                    raw = bytes.fromhex(hex_str)
+                except ValueError:
+                    return value.encode("utf-8")
+                fixed_len = self._get_fixed_bytes_length(type_str)
+                if fixed_len is None:
+                    return raw
+                if len(raw) >= fixed_len:
+                    return raw[:fixed_len]
+                return raw + (b"\x00" * (fixed_len - len(raw)))
+            return value.encode("utf-8")
+        return value
+
+    def _normalize_argument_for_abi(self, type_str, value):
+        if value is None:
+            return value
+        if "[" in type_str and "]" in type_str:
+            if not isinstance(value, list):
+                return value
+            inner_type = re.sub(r"\[[^\]]*\]$", "", type_str)
+            return [self._normalize_argument_for_abi(inner_type, v) for v in value]
+        base_type = (type_str or "").split("[", 1)[0]
+        if base_type.startswith("bytes"):
+            return self._normalize_bytes_value(base_type, value)
+        return value
+
     def get_transaction_data_from_chromosome(self, chromosome_index):
         data = ""
         arguments = []
@@ -90,7 +153,11 @@ class Individual():
                 arguments.append(self.chromosome[chromosome_index]["arguments"][j])
         try:
             argument_types = [argument_type.replace(" storage", "").replace(" memory", "") for argument_type in self.generator.interface[function]]
-            data += encode_abi(argument_types, arguments).hex()
+            normalized_arguments = [
+                self._normalize_argument_for_abi(arg_type, arg)
+                for arg_type, arg in zip(argument_types, arguments)
+            ]
+            data += encode_abi(argument_types, normalized_arguments).hex()
         except Exception as e:
             self.logger.error("%s", e)
             self.logger.error("%s: %s -> %s", function, self.generator.interface[function], arguments)
