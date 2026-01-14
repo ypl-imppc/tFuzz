@@ -28,7 +28,7 @@ LOCAL_BLOCK_GAS_LIMIT = 12000000
 # Default gas price for sending transactions
 GAS_PRICE = 10
 # Default account balance
-ACCOUNT_BALANCE = (1 << 256) - 1
+ACCOUNT_BALANCE = 10**30
 # Maximum length of individuals (function-call sequence length target)
 MAX_INDIVIDUAL_LENGTH = 10
 # Logging level
