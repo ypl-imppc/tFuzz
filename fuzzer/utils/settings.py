@@ -23,6 +23,8 @@ SOLVER_TIMEOUT = 0
 ATTACKER_ACCOUNTS = ["0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"]
 # Default gas limit for sending transactions
 GAS_LIMIT = 4500000
+# Local EVM block gas limit override (only used when REMOTE_FUZZING is False)
+LOCAL_BLOCK_GAS_LIMIT = 12000000
 # Default gas price for sending transactions
 GAS_PRICE = 10
 # Default account balance

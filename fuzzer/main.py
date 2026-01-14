@@ -175,6 +175,7 @@ class Fuzzer:
         self.contract_name = contract_name
         self.interface = get_interface_from_abi(abi)
         self.deployement_bytecode = deployment_bytecode
+        self.runtime_bytecode = runtime_bytecode
         self.blockchain_state = blockchain_state
         self.instrumented_evm = test_instrumented_evm
         self.solver = solver
@@ -339,6 +340,31 @@ class Fuzzer:
         except Exception:
             pass
         return None
+
+    def _force_deploy_runtime(self, runtime_hex):
+        if not runtime_hex:
+            return None
+        try:
+            if runtime_hex.startswith("0x"):
+                runtime_hex = runtime_hex[2:]
+            runtime_code = decode_hex(runtime_hex)
+        except Exception:
+            return None
+        seed = f"{self.contract_name}|fallback".encode()
+        addr = None
+        for i in range(0, 20):
+            suffix = str(i).encode() if i else b""
+            addr_bytes = keccak(seed + suffix)[-20:]
+            cand = "0x" + addr_bytes.hex()
+            if cand not in self.instrumented_evm.accounts:
+                addr = cand
+                break
+        if not addr:
+            return None
+        self.instrumented_evm.create_fake_account(addr, code=runtime_code)
+        self.instrumented_evm.accounts.append(addr)
+        self.env.nr_of_transactions += 1
+        return addr
 
     def _seed_values_for_abi_type(self, type_str: str):
         base = (type_str or "").split("[")[0]
@@ -548,7 +574,15 @@ class Fuzzer:
 
                     if result is None or result.is_error:
                         logger.error("Problem while deploying contract %s using account %s. Error message: %s", self.contract_name, self.instrumented_evm.accounts[0], getattr(result, "_error", b""))
-                        sys.exit(-2)
+                        if not settings.REMOTE_FUZZING:
+                            fallback_addr = self._force_deploy_runtime(self.runtime_bytecode)
+                            if fallback_addr:
+                                logger.warning("Forced runtime deployment for %s at %s (constructor skipped).", self.contract_name, fallback_addr)
+                                contract_address = fallback_addr
+                            else:
+                                sys.exit(-2)
+                        else:
+                            sys.exit(-2)
                     else:
                         contract_address = encode_hex(result.msg.storage_address)
                         self.instrumented_evm.accounts.append(contract_address)

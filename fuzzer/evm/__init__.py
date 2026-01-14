@@ -94,9 +94,23 @@ class InstrumentedEVM:
             else:
                 self.logger.error("Unknown block identifier.")
                 sys.exit(-4)
+        gas_limit = _block.gasLimit
+        if not self.w3:
+            try:
+                local_override = int(getattr(settings, "LOCAL_BLOCK_GAS_LIMIT", 0) or 0)
+            except Exception:
+                local_override = 0
+            try:
+                default_tx_gas = int(getattr(settings, "GAS_LIMIT", 0) or 0)
+            except Exception:
+                default_tx_gas = 0
+            if local_override:
+                gas_limit = max(gas_limit, local_override)
+            if default_tx_gas:
+                gas_limit = max(gas_limit, default_tx_gas)
         block_header = BlockHeader(difficulty=_block.difficulty,
                                    block_number=_block.number,
-                                   gas_limit=_block.gasLimit,
+                                   gas_limit=gas_limit,
                                    timestamp=_block.timestamp,
                                    coinbase=ZERO_ADDRESS,  # default value
                                    parent_hash=_block.parentHash,
