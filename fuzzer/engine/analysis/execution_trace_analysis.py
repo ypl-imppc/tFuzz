@@ -26,6 +26,49 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.env = fuzzing_environment
         self.symbolic_execution_count = 0
 
+    def _run_child_trace_overflow_detector(self, child_computation, indv, env, transaction_index):
+        """
+        Run integer-overflow detection on child-call traces.
+        This closes a blind spot where arithmetic bugs in callee contracts were
+        covered but never sent to detectors.
+        """
+        child_trace = getattr(child_computation, "trace", None)
+        if not child_trace:
+            return
+
+        try:
+            child_addr = to_hex(getattr(child_computation.msg, "to", b""))
+        except Exception:
+            child_addr = "child"
+
+        previous_instruction = None
+        for instruction in child_trace:
+            try:
+                pc, index, _ = env.detector_executor.integer_overflow_detector.detect_integer_overflow(
+                    env,
+                    None,
+                    previous_instruction,
+                    instruction,
+                    indv,
+                    transaction_index,
+                )
+                if pc:
+                    # Use "address:pc" to avoid key collisions with parent-trace pcs.
+                    scoped_pc = f"{child_addr}:{hex(pc) if isinstance(pc, int) else str(pc)}"
+                    env.detector_executor.report_integer_overflow(
+                        env.results["errors"],
+                        pc,
+                        indv,
+                        env,
+                        index if index is not None else transaction_index,
+                        source_map=None,
+                        error_key=scoped_pc,
+                    )
+            except Exception:
+                # Child-trace analysis is best-effort and should not break fuzzing.
+                pass
+            previous_instruction = instruction
+
     def setup(self, ng, engine):
         pass
 
@@ -153,6 +196,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                 if child_computation.msg.to not in env.children_code_coverage:
                     env.children_code_coverage[child_computation.msg.to] = set()
                 env.children_code_coverage[child_computation.msg.to].update([x["pc"] for x in child_computation.trace])
+                self._run_child_trace_overflow_detector(child_computation, indv, env, transaction_index)
 
             env.nr_of_transactions += 1
 

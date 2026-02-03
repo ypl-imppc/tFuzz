@@ -97,6 +97,34 @@ class DetectorExecutor:
         code = code.split("//", 1)[0]
         return re.search(r"(\+\+|--|\+|\-|\*|/)", code) is not None
 
+    def report_integer_overflow(self, errors, pc, individual, mfe, index, source_map=None, error_key=None):
+        detector = self.integer_overflow_detector
+        active_source_map = self.source_map if source_map is None else source_map
+        key = pc if error_key is None else error_key
+
+        if not DetectorExecutor.add_error(errors, key, "Integer Overflow", individual, mfe, detector, active_source_map):
+            return False
+
+        color = DetectorExecutor.get_color_for_severity(detector.severity)
+        self.logger.title(color+"-----------------------------------------------------")
+        self.logger.title(color+"          !!! Integer overflow detected !!!          ")
+        self.logger.title(color+"-----------------------------------------------------")
+        self.logger.title(color+"SWC-ID:   "+str(detector.swc_id))
+        self.logger.title(color+"Severity: "+detector.severity)
+        self.logger.title(color+"-----------------------------------------------------")
+        if active_source_map and isinstance(pc, int) and active_source_map.get_buggy_line(pc):
+            self.logger.title(color+"Source code line:")
+            self.logger.title(color+"-----------------------------------------------------")
+            line = active_source_map.get_location(pc)['begin']['line'] + 1
+            column = active_source_map.get_location(pc)['begin']['column'] + 1
+            self.logger.title(color+active_source_map.source.filename+":"+str(line)+":"+str(column))
+            self.logger.title(color+active_source_map.get_buggy_line(pc))
+            self.logger.title(color+"-----------------------------------------------------")
+        self.logger.title(color+"Transaction sequence:")
+        self.logger.title(color+"-----------------------------------------------------")
+        print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
+        return True
+
     def get_color_for_severity(severity):
         if severity == "High":
             return "\u001b[31m" # Red
@@ -154,25 +182,8 @@ class DetectorExecutor:
             source_line = self.source_map.get_buggy_line(pc)
             if not DetectorExecutor.is_arithmetic_line(source_line):
                 pc = None
-        if pc and DetectorExecutor.add_error(errors, pc, "Integer Overflow", individual, mfe, self.integer_overflow_detector, self.source_map):
-            color = DetectorExecutor.get_color_for_severity(self.integer_overflow_detector.severity)
-            self.logger.title(color+"-----------------------------------------------------")
-            self.logger.title(color+"          !!! Integer overflow detected !!!          ")
-            self.logger.title(color+"-----------------------------------------------------")
-            self.logger.title(color+"SWC-ID:   "+str(self.integer_overflow_detector.swc_id))
-            self.logger.title(color+"Severity: "+self.integer_overflow_detector.severity)
-            self.logger.title(color+"-----------------------------------------------------")
-            if self.source_map and self.source_map.get_buggy_line(pc):
-                self.logger.title(color+"Source code line:")
-                self.logger.title(color+"-----------------------------------------------------")
-                line = self.source_map.get_location(pc)['begin']['line'] + 1
-                column = self.source_map.get_location(pc)['begin']['column'] + 1
-                self.logger.title(color+self.source_map.source.filename+":"+str(line)+":"+str(column))
-                self.logger.title(color+self.source_map.get_buggy_line(pc))
-                self.logger.title(color+"-----------------------------------------------------")
-            self.logger.title(color+"Transaction sequence:")
-            self.logger.title(color+"-----------------------------------------------------")
-            print_individual_solution_as_transaction(self.logger, individual.solution, color, self.function_signature_mapping, index)
+        if pc:
+            self.report_integer_overflow(errors, pc, individual, mfe, index, source_map=self.source_map)
 
         pc, index = self.reentrancy_detector.detect_reentrancy(tainted_record, current_instruction, transaction_index)
         if pc and self.source_map and self.source_map.get_buggy_line(pc):

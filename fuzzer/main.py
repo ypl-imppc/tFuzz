@@ -872,8 +872,7 @@ def main():
     # Check if contract has already been analyzed
     if args.results and os.path.exists(args.results):
         os.remove(args.results)
-        logger.info("Contract "+str(args.source)+" has already been analyzed: "+str(args.results))
-        sys.exit(0)
+        logger.info("Overwriting existing results file: "+str(args.results))
 
     source_text = ""
     try:
