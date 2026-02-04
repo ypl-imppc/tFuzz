@@ -56,6 +56,32 @@ python3 main.py -a /path/to/abi.json -c 0x... --rpc-host localhost --rpc-port 85
 输出结果：
 - 结果写入由 `-r/--results` 控制：可写到单个 `.json`，也可写到目录（每个合约一个 json），见 `fuzzer/engine/analysis/execution_trace_analysis.py` 的 `finalize()`。
 
+### 1.4 组合式特征评分（Compositional Feature Scoring）参数
+当前适应度函数已支持：
+
+`F(TC) = alpha * CoverageScore + beta * FeatureScore - gamma * CostPenalty`
+
+- 默认参数：`alpha=1.0, beta=0.3, gamma=0.05`
+- 三类漏洞子分权重：`--feature-weight-re/--feature-weight-io/--feature-weight-td`（默认均为 1.0）
+- 成本归一化尺度：`--cost-steps-scale/--cost-calldata-scale/--cost-time-scale`
+- 可观测开关：`--log-features`（每代输出 best TC 的 Coverage/Feature/Cost 与 `S_re/S_io/S_td`）
+
+示例（启用组合式评分）：
+```bash
+cd fuzzer
+python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out.json \
+  --fitness-alpha 1.0 --fitness-beta 0.3 --fitness-gamma 0.05 \
+  --feature-weight-re 1 --feature-weight-io 1 --feature-weight-td 1 \
+  --log-features
+```
+
+示例（关闭 FeatureScore，退化到旧行为用于对比）：
+```bash
+cd fuzzer
+python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out_baseline.json \
+  --fitness-beta 0
+```
+
 ---
 
 ## 2. 代码结构总览（含未启用/未引用标注）
@@ -84,7 +110,9 @@ python3 main.py -a /path/to/abi.json -c 0x... --rpc-host localhost --rpc-port 85
     - `functionParameter.py`：提供一份基础种子池（address/uint/int/bool/string/byte）。
   - `fuzzer/engine/operators/`：遗传算子（selection/crossover/mutation），含数据依赖版本。
   - `fuzzer/engine/analysis/`：`ExecutionTraceAnalyzer`（执行 trace、覆盖率、符号引导、探测器触发等），`SymbolicTaintAnalyzer`（符号污点传播）。
-  - `fuzzer/engine/fitness/__init__.py`：适应度函数（优先“特征路径命中数”，否则分支覆盖/数据依赖）。
+  - `fuzzer/engine/fitness/__init__.py`：适应度函数（Coverage + Compositional FeatureScore - CostPenalty，支持 `beta=0` 兼容回退）。
+  - `fuzzer/engine/fitness/feature_extractor.py`：从动态执行轨迹提取三类漏洞的结构化特征与成本指标。
+  - `fuzzer/engine/fitness/feature_scorer.py`：按 SWC-107/101/116 组合规则计算 `S_re/S_io/S_td` 与 `FeatureScore`。
   - `fuzzer/engine/plugin_interfaces/`：分析器/算子的接口与元类校验。
 - `fuzzer/detectors/`：漏洞探测器（默认启用部分）。
   - `fuzzer/detectors/__init__.py`：`DetectorExecutor`（集中调度）。
@@ -285,4 +313,3 @@ python3 main.py -a /path/to/abi.json -c 0x... --rpc-host localhost --rpc-port 85
 - 远程 fuzz（ABI 模式）依赖 RPC 可达，否则会在获取区块/存储/代码时报错。
 - 生成 CFG pdf 依赖 Graphviz；否则会提示安装。
 - solc 版本：代码会尝试安装/切换多个版本，但离线环境会失败；建议预先把常用版本安装到 `solcx`。
-

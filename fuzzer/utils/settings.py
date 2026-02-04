@@ -43,3 +43,31 @@ RPC_PORT = 8545
 REMOTE_FUZZING = False
 # True = Environmental instrumentation enabled, False = Environmental instrumentation disabled
 ENVIRONMENTAL_INSTRUMENTATION = True
+
+# ---------- Compositional feature-scoring fitness ----------
+# F(TC) = alpha * CoverageScore + beta * FeatureScore - gamma * CostPenalty
+FITNESS_ALPHA = 1.0
+FITNESS_BETA = 0.3
+FITNESS_GAMMA = 0.05
+
+# Vulnerability-type weights in FeatureScore(TC)
+FEATURE_WEIGHT_REENTRANCY = 1.0
+FEATURE_WEIGHT_OVERFLOW = 1.0
+FEATURE_WEIGHT_TIMESTAMP = 1.0
+
+# Per-vulnerability caps/thresholds
+FEATURE_IO_LEVEL1_CAP = 1.0
+
+# Cost-penalty normalization scales
+COST_STEPS_SCALE = 8000.0
+COST_CALLDATA_SCALE = 4096.0
+COST_WALL_TIME_SCALE = 0.25
+
+# Cost-penalty component weights (normalized internally)
+COST_WEIGHT_STEPS = 0.45
+COST_WEIGHT_TX_COUNT = 0.30
+COST_WEIGHT_CALLDATA = 0.20
+COST_WEIGHT_WALL_TIME = 0.05
+
+# Feature observability switch
+LOG_FEATURES = False

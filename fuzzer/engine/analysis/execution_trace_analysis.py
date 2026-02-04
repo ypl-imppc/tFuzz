@@ -9,7 +9,8 @@ import psutil
 from engine.environment import FuzzingEnvironment
 from engine.plugin_interfaces import OnTheFlyAnalysis
 
-from engine.fitness import fitness_function
+from engine.fitness.feature_extractor import CompositionalFeatureExtractor
+from engine.fitness.feature_scorer import score_compositional_features
 
 from utils.utils import initialize_logger, convert_stack_value_to_int, convert_stack_value_to_hex, normalize_32_byte_hex_address, get_function_signature_mapping
 from eth._utils.address import force_bytes_to_address
@@ -25,6 +26,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.logger = initialize_logger("Analysis")
         self.env = fuzzing_environment
         self.symbolic_execution_count = 0
+        self.feature_extractor = CompositionalFeatureExtractor()
 
     def _run_child_trace_overflow_detector(self, child_computation, indv, env, transaction_index):
         """
@@ -77,6 +79,11 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.env.memoized_storage.clear()
         self.env.memoized_symbolic_execution.clear()
         self.env.individual_branches.clear()
+        self.env.individual_feature_vectors.clear()
+        self.env.individual_feature_scores.clear()
+        self.env.individual_cost_metrics.clear()
+        self.env.individual_cost_penalties.clear()
+        self.env.individual_fitness_components.clear()
 
         """from utils.utils import get_function_signature_mapping
         m = get_function_signature_mapping(self.env.abi)
@@ -139,6 +146,32 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
             "branch_coverage": branch_coverage_percentage
         })
 
+        try:
+            best = population.best_indv(engine.fitness)
+            comp = self.env.individual_fitness_components.get(best.hash, {})
+            self.env.results["generations"][-1].update({
+                "best_fitness": comp.get("total"),
+                "best_coverage_score": comp.get("coverage"),
+                "best_feature_score": comp.get("feature"),
+                "best_cost_penalty": comp.get("cost_penalty"),
+                "best_s_re": comp.get("s_re"),
+                "best_s_io": comp.get("s_io"),
+                "best_s_td": comp.get("s_td"),
+            })
+            if settings.LOG_FEATURES:
+                self.logger.info(
+                    "Best TC metrics | F=%.4f Cov=%.4f Feat=%.4f Cost=%.4f | S_re=%.2f S_io=%.2f S_td=%.2f",
+                    float(comp.get("total", 0.0)),
+                    float(comp.get("coverage", 0.0)),
+                    float(comp.get("feature", 0.0)),
+                    float(comp.get("cost_penalty", 0.0)),
+                    float(comp.get("s_re", 0.0)),
+                    float(comp.get("s_io", 0.0)),
+                    float(comp.get("s_td", 0.0)),
+                )
+        except Exception:
+            pass
+
         if len(self.env.code_coverage) == self.env.previous_code_coverage_length:
             self.symbolic_execution(population.indv_generator)
             if self.symbolic_execution_count == settings.MAX_SYMBOLIC_EXECUTION:
@@ -161,8 +194,9 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         indv.data_dependencies = []
         contract_address = None
 
-        # Initialize dynamic feature-path counters for this individual
-        feature_hits = {"KA1": 0, "KA2": 0, "KA3": 0}
+        # Legacy feature counters (for beta=0 compatibility) and new compositional context.
+        legacy_feature_hits = {"KA1": 0, "KA2": 0, "KA3": 0}
+        feature_context = self.feature_extractor.new_context()
 
         env.detector_executor.initialize_detectors()
 
@@ -199,6 +233,7 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                 self._run_child_trace_overflow_detector(child_computation, indv, env, transaction_index)
 
             env.nr_of_transactions += 1
+            tx_feature_state = self.feature_extractor.begin_transaction(feature_context, transaction)
 
             previous_instruction = None
             previous_branch = []
@@ -210,17 +245,17 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
             for i, instruction in enumerate(result.trace):
 
                 env.symbolic_taint_analyzer.propagate_taint(instruction, contract_address)
+                tainted_record = env.symbolic_taint_analyzer.get_tainted_record(index=-2)
 
                 env.detector_executor.run_detectors(previous_instruction, instruction, env.results["errors"],
-                                                env.symbolic_taint_analyzer.get_tainted_record(index=-2), indv, env, previous_branch,
+                                                tainted_record, indv, env, previous_branch,
                                                 transaction_index)
 
-                # --- Dynamic feature-path coverage collection ---
+                # Legacy dynamic feature-path counters
                 try:
                     op = instruction.get("op")
-                    # KA3: time references -> TIMESTAMP
                     if op == "TIMESTAMP":
-                        feature_hits["KA3"] += 1
+                        legacy_feature_hits["KA3"] += 1
                         try:
                             func_hash = indv.chromosome[transaction_index]["arguments"][0]
                             gen = getattr(indv, "generator", None)
@@ -243,24 +278,31 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
                                     gen.add_timestamp_to_pool(func_hash, ts_int)
                         except Exception:
                             pass
-                    # KA2: arithmetic operations
                     elif op in {"ADD", "MUL", "SUB", "DIV", "SDIV", "MOD", "SMOD", "ADDMOD", "MULMOD", "EXP", "SHL", "SHR", "SAR",
                                  "LT", "GT", "SLT", "SGT", "EQ", "ISZERO", "AND", "OR", "XOR", "NOT"}:
-                        feature_hits["KA2"] += 1
-                    # KA1: value-bearing external calls -> CALL with non-zero value argument
+                        legacy_feature_hits["KA2"] += 1
                     elif op == "CALL":
                         st = instruction.get("stack", [])
-                        # CALL pops 7 args: gas,to,value,inOffset,inSize,outOffset,outSize
-                        # Value is the 5th from top of stack (index -5)
                         if isinstance(st, list) and len(st) >= 7:
                             try:
                                 call_value = convert_stack_value_to_int(st[-5])
                                 if call_value and int(call_value) > 0:
-                                    feature_hits["KA1"] += 1
+                                    legacy_feature_hits["KA1"] += 1
                             except Exception:
                                 pass
                 except Exception:
-                    # Never let feature collection break execution analysis
+                    pass
+
+                # New compositional feature extraction.
+                try:
+                    self.feature_extractor.observe_instruction(
+                        feature_context,
+                        tx_feature_state,
+                        instruction,
+                        tainted_record,
+                        getattr(env.detector_executor, "source_map", None),
+                    )
+                except Exception:
                     pass
 
                 # If constructor, we don't have to take into account the constructor inputs because they will be part of the
@@ -548,10 +590,22 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
             if not result.is_error and not transaction["to"]:
                 contract_address = encode_hex(result.msg.storage_address)
 
-        # Persist dynamic feature-path metrics for this individual
+        # Persist legacy counters + compositional feature vectors/scores.
         try:
-            env.individual_feature_hits[indv.hash] = dict(feature_hits)
-            env.individual_feature_counts[indv.hash] = int(sum(feature_hits.values()))
+            env.individual_feature_hits[indv.hash] = dict(legacy_feature_hits)
+            env.individual_feature_counts[indv.hash] = int(sum(legacy_feature_hits.values()))
+        except Exception:
+            pass
+        try:
+            feature_vector = self.feature_extractor.finalize_context(
+                feature_context,
+                solidity_ge_08=bool(getattr(env.args, "_solidity_ge_08", False)),
+                execution_wall_time=time.time() - feature_context["started_at"],
+            )
+            feature_scores = score_compositional_features(feature_vector)
+            env.individual_feature_vectors[indv.hash] = feature_vector
+            env.individual_feature_scores[indv.hash] = feature_scores
+            env.individual_cost_metrics[indv.hash] = dict(feature_vector.get("cost", {}))
         except Exception:
             pass
 
@@ -884,16 +938,30 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.env.results["memory_consumption"] = psutil.Process(os.getpid()).memory_info().rss/1024/1024
         self.env.results["address_under_test"] = self.env.population.indv_generator.contract
         self.env.results["seed"] = self.env.seed
+        self.env.results["fitness_config"] = {
+            "alpha": settings.FITNESS_ALPHA,
+            "beta": settings.FITNESS_BETA,
+            "gamma": settings.FITNESS_GAMMA,
+            "w_re": settings.FEATURE_WEIGHT_REENTRANCY,
+            "w_io": settings.FEATURE_WEIGHT_OVERFLOW,
+            "w_td": settings.FEATURE_WEIGHT_TIMESTAMP,
+        }
 
         # Record best individual by feature-path fitness and its summary
         try:
             best = population.best_indv(engine.fitness)
+            comp = self.env.individual_fitness_components.get(best.hash, {})
+            scored = self.env.individual_feature_scores.get(best.hash, {})
+            vec = self.env.individual_feature_vectors.get(best.hash, {})
             self.env.results.setdefault("feature_coverage", {})
             self.env.results["feature_coverage"].update({
-                "best_count": int(self.env.individual_feature_counts.get(best.hash, 0)),
-                "best_hits": self.env.individual_feature_hits.get(best.hash, {}),
+                "legacy_best_count": int(self.env.individual_feature_counts.get(best.hash, 0)),
+                "legacy_best_hits": self.env.individual_feature_hits.get(best.hash, {}),
+                "best_vector": vec,
+                "best_score": scored,
                 "best_sequence_length": len(getattr(best, 'chromosome', [])),
             })
+            self.env.results["best_fitness"] = comp
             # Also expose the best test case (chromosome) for reproducibility
             self.env.results["best_test_case"] = getattr(best, 'chromosome', [])
         except Exception:
@@ -919,10 +987,3 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
 
         diff = list(set(self.env.code_coverage).symmetric_difference(set([hex(x) for x in self.env.overall_pcs])))
         self.logger.debug("Instructions not executed: %s", sorted(diff))
-
-        # Store feature coverage results for this individual
-        try:
-            env.individual_feature_hits[indv.hash] = dict(feature_hits)
-            env.individual_feature_counts[indv.hash] = sum(feature_hits.values())
-        except Exception:
-            pass

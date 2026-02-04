@@ -25,4 +25,11 @@ class FuzzingEnvironment:
         self.individual_feature_hits = dict()
         self.individual_feature_counts = dict()
 
+        # Compositional-feature fitness artifacts
+        self.individual_feature_vectors = dict()
+        self.individual_feature_scores = dict()
+        self.individual_cost_metrics = dict()
+        self.individual_cost_penalties = dict()
+        self.individual_fitness_components = dict()
+
         self.__dict__.update(kwargs)

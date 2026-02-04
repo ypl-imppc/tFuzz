@@ -160,6 +160,31 @@ def _auto_select_top_caller_from_source(source_text: str) -> str:
         return best
     return names[-1]
 
+
+def _version_ge_08(version_text: str) -> bool:
+    if not version_text:
+        return False
+    v = str(version_text).strip()
+    if v.startswith("v"):
+        v = v[1:]
+    m = re.match(r"^(\d+)\.(\d+)", v)
+    if not m:
+        return False
+    major = int(m.group(1))
+    minor = int(m.group(2))
+    return major > 0 or (major == 0 and minor >= 8)
+
+
+def _infer_solidity_ge_08_from_source(source_text: str) -> bool:
+    if not source_text:
+        return False
+    m = re.search(r"pragma\s+solidity\s+([^;]+);", source_text, flags=re.IGNORECASE)
+    if not m:
+        return False
+    expr = m.group(1)
+    tokens = re.findall(r"(\d+\.\d+(?:\.\d+)?)", expr)
+    return any(_version_ge_08(tok) for tok in tokens)
+
 class Fuzzer:
     def __init__(self, contract_name, abi, deployment_bytecode, runtime_bytecode, test_instrumented_evm, blockchain_state, solver, args, seed, source_map=None):
         global logger
@@ -885,8 +910,12 @@ def main():
     src_lower = source_text.lower()
     has_time_ref = bool(re.search(r"\bnow\b", src_lower)) or ("block.timestamp" in src_lower)
     has_pragma = "pragma solidity" in src_lower
+    has_unchecked = "unchecked" in src_lower
+    solidity_ge_08_hint = _infer_solidity_ge_08_from_source(source_text)
     setattr(args, "_has_time_ref", has_time_ref)
     setattr(args, "_has_pragma", has_pragma)
+    setattr(args, "_has_unchecked", has_unchecked)
+    setattr(args, "_solidity_ge_08", solidity_ge_08_hint)
 
     # Heuristic: time-based branches are solver-heavy (mod constraints). Cap solver work and symbolic retries.
     if has_time_ref:
@@ -950,6 +979,7 @@ def main():
             if not compiler_output:
                 logger.error("No compiler output for: " + args.source)
                 sys.exit(-1)
+            setattr(args, "_solidity_ge_08", bool(getattr(args, "_solidity_ge_08", False) or _version_ge_08(str(args.solc_version))))
             # Auto-select the top-level contract (calls others, not called by others) when -c/--contract is not provided
             if not args.contract:
                 try:
@@ -1036,11 +1066,42 @@ def launch_argument_parser():
     parser.add_argument("-pm", "--probability-mutation",
                         help="Size of the population.", action="store",
                         dest="probability_mutation", type=float)
+    parser.add_argument("--fitness-alpha",
+                        help="Fitness alpha for coverage term (default: " + str(settings.FITNESS_ALPHA) + ").",
+                        action="store", dest="fitness_alpha", type=float)
+    parser.add_argument("--fitness-beta",
+                        help="Fitness beta for compositional feature term (default: " + str(settings.FITNESS_BETA) + ").",
+                        action="store", dest="fitness_beta", type=float)
+    parser.add_argument("--fitness-gamma",
+                        help="Fitness gamma for cost-penalty term (default: " + str(settings.FITNESS_GAMMA) + ").",
+                        action="store", dest="fitness_gamma", type=float)
+    parser.add_argument("--feature-weight-re",
+                        help="FeatureScore weight for reentrancy (default: " + str(settings.FEATURE_WEIGHT_REENTRANCY) + ").",
+                        action="store", dest="feature_weight_re", type=float)
+    parser.add_argument("--feature-weight-io",
+                        help="FeatureScore weight for integer overflow (default: " + str(settings.FEATURE_WEIGHT_OVERFLOW) + ").",
+                        action="store", dest="feature_weight_io", type=float)
+    parser.add_argument("--feature-weight-td",
+                        help="FeatureScore weight for timestamp dependency (default: " + str(settings.FEATURE_WEIGHT_TIMESTAMP) + ").",
+                        action="store", dest="feature_weight_td", type=float)
+    parser.add_argument("--feature-io-level1-cap",
+                        help="Cap for overflow Level-1 arithmetic presence score (default: " + str(settings.FEATURE_IO_LEVEL1_CAP) + ").",
+                        action="store", dest="feature_io_level1_cap", type=float)
+    parser.add_argument("--cost-steps-scale",
+                        help="Normalization scale for step-count penalty (default: " + str(settings.COST_STEPS_SCALE) + ").",
+                        action="store", dest="cost_steps_scale", type=float)
+    parser.add_argument("--cost-calldata-scale",
+                        help="Normalization scale for calldata-size penalty (default: " + str(settings.COST_CALLDATA_SCALE) + ").",
+                        action="store", dest="cost_calldata_scale", type=float)
+    parser.add_argument("--cost-time-scale",
+                        help="Normalization scale for wall-time penalty (default: " + str(settings.COST_WALL_TIME_SCALE) + ").",
+                        action="store", dest="cost_time_scale", type=float)
 
     # Miscellaneous parameters
     parser.add_argument("-r", "--results", type=str, help="Folder or JSON file where results should be stored.")
     parser.add_argument("--seed", type=float, help="Initialize the random number generator with a given seed.")
     parser.add_argument("--cfg", help="Build control-flow graph and highlight code coverage.", action="store_true")
+    parser.add_argument("--log-features", help="Log compositional feature metrics for each generation.", action="store_true")
     parser.add_argument("--rpc-host", help="Ethereum client RPC hostname.", action="store", dest="rpc_host", type=str)
     parser.add_argument("--rpc-port", help="Ethereum client RPC port.", action="store", dest="rpc_port", type=int)
 
@@ -1099,6 +1160,26 @@ def launch_argument_parser():
         settings.PROBABILITY_CROSSOVER = args.probability_crossover
     if args.probability_mutation:
         settings.PROBABILITY_MUTATION = args.probability_mutation
+    if args.fitness_alpha is not None:
+        settings.FITNESS_ALPHA = args.fitness_alpha
+    if args.fitness_beta is not None:
+        settings.FITNESS_BETA = args.fitness_beta
+    if args.fitness_gamma is not None:
+        settings.FITNESS_GAMMA = args.fitness_gamma
+    if args.feature_weight_re is not None:
+        settings.FEATURE_WEIGHT_REENTRANCY = args.feature_weight_re
+    if args.feature_weight_io is not None:
+        settings.FEATURE_WEIGHT_OVERFLOW = args.feature_weight_io
+    if args.feature_weight_td is not None:
+        settings.FEATURE_WEIGHT_TIMESTAMP = args.feature_weight_td
+    if args.feature_io_level1_cap is not None:
+        settings.FEATURE_IO_LEVEL1_CAP = args.feature_io_level1_cap
+    if args.cost_steps_scale is not None:
+        settings.COST_STEPS_SCALE = args.cost_steps_scale
+    if args.cost_calldata_scale is not None:
+        settings.COST_CALLDATA_SCALE = args.cost_calldata_scale
+    if args.cost_time_scale is not None:
+        settings.COST_WALL_TIME_SCALE = args.cost_time_scale
 
     if args.data_dependency == None:
         args.data_dependency = 1
@@ -1116,6 +1197,8 @@ def launch_argument_parser():
         settings.MAX_INDIVIDUAL_LENGTH = args.max_individual_length
     if args.max_symbolic_execution:
         settings.MAX_SYMBOLIC_EXECUTION = args.max_symbolic_execution
+
+    settings.LOG_FEATURES = bool(getattr(args, "log_features", False))
 
     if args.abi:
         settings.REMOTE_FUZZING = True
