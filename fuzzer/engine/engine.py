@@ -197,14 +197,16 @@ class EvolutionaryFuzzingEngine(object):
         maximum, minimum and mean values.
         '''
         # Wrt original fitness.
-        self.ori_fmax = self.population.max(self.ori_fitness)
-        self.ori_fmin = self.population.min(self.ori_fitness)
-        self.ori_fmean = self.population.mean(self.ori_fitness)
+        ori_fits = self.population.all_fits(self.ori_fitness)
+        self.ori_fmax = max(ori_fits)
+        self.ori_fmin = min(ori_fits)
+        self.ori_fmean = sum(ori_fits) / len(ori_fits)
 
         # Wrt decorated fitness.
-        self.fmax = self.population.max(self.fitness)
-        self.fmin = self.population.min(self.fitness)
-        self.fmean = self.population.mean(self.fitness)
+        fits = self.population.all_fits(self.fitness)
+        self.fmax = max(fits)
+        self.fmin = min(fits)
+        self.fmean = sum(fits) / len(fits)
 
     def _check_parameters(self):
         '''

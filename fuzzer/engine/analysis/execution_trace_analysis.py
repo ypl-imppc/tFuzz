@@ -187,6 +187,9 @@ class ExecutionTraceAnalyzer(OnTheFlyAnalysis):
         self.env.previous_code_coverage_length = len(self.env.code_coverage)
 
     def execution_function(self, indv, env: FuzzingEnvironment):
+        if not indv.solution:
+            indv.solution = indv.decode()
+
         env.unique_individuals.add(indv.hash)
 
         # Initialize metric

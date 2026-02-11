@@ -153,14 +153,16 @@ class Population(object):
 
         '''
         all_fits = self.all_fits(fitness)
-        return max(self.individuals, key=lambda indv: all_fits[self.individuals.index(indv)])
+        best_idx = max(range(len(self.individuals)), key=all_fits.__getitem__)
+        return self.individuals[best_idx]
 
     def worst_indv(self, fitness):
         '''
         The individual with the worst fitness.
         '''
         all_fits = self.all_fits(fitness)
-        return min(self.individuals, key=lambda indv: all_fits[self.individuals.index(indv)])
+        worst_idx = min(range(len(self.individuals)), key=all_fits.__getitem__)
+        return self.individuals[worst_idx]
 
     def max(self, fitness):
         '''

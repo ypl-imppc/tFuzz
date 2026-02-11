@@ -17,19 +17,24 @@ class Individual():
         self.chromosome = []
         self.solution = []
         self.generator = generator
+        self._hash_cache = None
 
     @property
     def hash(self):
-        if not self.solution:
-            self.solution = self.decode()
-        return str(hash(str([tx for tx in self.solution])))
+        if self._hash_cache is not None:
+            return self._hash_cache
+        # Hashing chromosome repr is much cheaper than rebuilding a full solution string repeatedly.
+        self._hash_cache = str(hash(repr(self.chromosome)))
+        return self._hash_cache
 
     def init(self, chromosome=None):
         if not chromosome:
             self.chromosome = self.generator.generate_random_individual()
         else:
             self.chromosome = chromosome
-        self.solution = self.decode()
+        self._hash_cache = None
+        # Decode lazily right before execution to avoid repeated ABI encoding work in GA operators.
+        self.solution = []
         return self
 
     def clone(self):
@@ -38,6 +43,7 @@ class Individual():
         return indv
 
     def decode(self):
+        self._hash_cache = None
         solution = []
         for i in range(len(self.chromosome)):
             transaction = {}

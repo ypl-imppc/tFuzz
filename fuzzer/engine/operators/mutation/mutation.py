@@ -23,22 +23,22 @@ class Mutation(Mutation):
         for gene in individual.chromosome:
             # TRANSACTION
             function_hash = gene["arguments"][0]
-            for element in gene:
-                if element == "account" and random.random() <= self.pm:
-                    gene["account"] = individual.generator.get_random_account(function_hash)
-                elif element == "amount" and random.random() <= self.pm:
-                    gene["amount"] = individual.generator.get_random_amount(function_hash)
-                elif element == "gaslimit" and random.random() <= self.pm:
-                    gene["gaslimit"] = individual.generator.get_random_gaslimit(function_hash)
-                else:
-                    for argument_index in range(1, len(gene["arguments"])):
-                        if random.random() > self.pm:
-                            continue
-                        argument_type = individual.generator.interface[function_hash][argument_index - 1]
-                        argument = individual.generator.get_random_argument(argument_type,
-                                                                            function_hash,
-                                                                            argument_index - 1)
-                        gene["arguments"][argument_index] = argument
+            if random.random() <= self.pm:
+                gene["account"] = individual.generator.get_random_account(function_hash)
+            if random.random() <= self.pm:
+                gene["amount"] = individual.generator.get_random_amount(function_hash)
+            if random.random() <= self.pm:
+                gene["gaslimit"] = individual.generator.get_random_gaslimit(function_hash)
+
+            # Mutate each argument at most once per gene.
+            for argument_index in range(1, len(gene["arguments"])):
+                if random.random() > self.pm:
+                    continue
+                argument_type = individual.generator.interface[function_hash][argument_index - 1]
+                argument = individual.generator.get_random_argument(argument_type,
+                                                                    function_hash,
+                                                                    argument_index - 1)
+                gene["arguments"][argument_index] = argument
 
             # BLOCK
             if "timestamp" in gene:
@@ -90,5 +90,6 @@ class Mutation(Mutation):
                 if address and address not in gene["returndatasize"]:
                     gene["returndatasize"][address] = returndatasize_value
 
-        individual.solution = individual.decode()
+        individual._hash_cache = None
+        individual.solution = []
         return individual

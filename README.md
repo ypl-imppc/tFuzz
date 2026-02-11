@@ -12,11 +12,12 @@
 `fuzzer/main.py` 里大量使用 `from evm import ...` / `from engine import ...` 这类**相对当前目录**的导入方式（而不是 `fuzzer.evm`）。因此推荐从 `fuzzer/` 目录运行：
 
 ```bash
+conda activate tfuzz-py38
 cd fuzzer
 python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out.json
 ```
 
-**使用conda activate tfuzz-py38这个环境运行测试**
+建议所有实验都在 `tfuzz-py38` 环境中执行（`solcx`/`z3` 等依赖在该环境中已验证可用）。
 
 也可以在仓库根目录运行，但需要把 `fuzzer/` 加到 `PYTHONPATH`：
 
@@ -68,6 +69,7 @@ python3 main.py -a /path/to/abi.json -c 0x... --rpc-host localhost --rpc-port 85
 
 示例（启用组合式评分）：
 ```bash
+conda activate tfuzz-py38
 cd fuzzer
 python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out.json \
   --fitness-alpha 1.0 --fitness-beta 0.3 --fitness-gamma 0.05 \
@@ -77,10 +79,36 @@ python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out.json \
 
 示例（关闭 FeatureScore，退化到旧行为用于对比）：
 ```bash
+conda activate tfuzz-py38
 cd fuzzer
 python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out_baseline.json \
   --fitness-beta 0
 ```
+
+### 1.5 A/B 对比实验（可复现）
+固定预算、固定随机种子，推荐至少跑两组：
+
+1) `beta=0`（基线）
+```bash
+conda activate tfuzz-py38
+cd fuzzer
+python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r /tmp/tfuzz_beta0.json \
+  --generations 6 --population-size 12 --seed 0.123456 --fitness-beta 0
+```
+
+2) `beta=0.3`（组合式特征评分）
+```bash
+conda activate tfuzz-py38
+cd fuzzer
+python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r /tmp/tfuzz_beta03.json \
+  --generations 6 --population-size 12 --seed 0.123456 \
+  --fitness-alpha 1.0 --fitness-beta 0.3 --fitness-gamma 0.05 --log-features
+```
+
+建议验收口径：
+- 覆盖率不明显下降（`code_coverage` / `branch_coverage`）
+- `generations[*].best_feature_score` 在 `beta>0` 场景显著高于 `beta=0`
+- `generations[*].best_cost_penalty` 非零且稳定（说明防“堆长度刷分”在生效）
 
 ---
 
@@ -285,6 +313,10 @@ python3 main.py -s test/reentrancy/inter_RE_buggy_6.sol -r ./out_baseline.json \
 - 交易数、吞吐、覆盖率、耗时、内存
 - 漏洞 `errors`（按 PC 聚合，包含 SWC-ID、severity、对应交易序列、可选 source-map 行列/代码片段）
 - 每代的覆盖率曲线（`generations`）
+- 组合式评分相关：
+  - `fitness_config`：`alpha/beta/gamma` 与 `w_re/w_io/w_td`
+  - `best_fitness`：`coverage/feature/cost_penalty/total` 与 `s_re/s_io/s_td`
+  - `feature_coverage.best_score` 与 `feature_coverage.best_vector`
 - 可选：`best_test_case`（便于复现实验）
 
 ### 7.2 CFG 输出
